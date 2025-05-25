@@ -1,0 +1,35 @@
+{% if chart_image %}
+<b>📊 TRENDLINE BREAKOUT ALERT 📊</b>
+
+<b>{{ signal_type }}</b> Signal on <b>{{ stock_symbol }}</b>
+<b>Strategy:</b> {{ strategy_name }}
+<b>Time:</b> {{ timestamp }}
+<b>Price:</b> {{ price }}
+
+<b>OHLC:</b>
+Open: {{ open }}
+High: {{ high }}
+Low: {{ low }}
+Close: {{ close }}
+Volume: {{ volume }}
+
+<b>Details:</b> {{ trendline_details | default('Trendline breakout detected') }}
+<b>Indicators:</b> {{ indicators }}
+{% else %}
+📊 <b>TRENDLINE BREAKOUT ALERT</b> 📊
+
+<b>{{ signal_type }}</b> Signal on <b>{{ stock_symbol }}</b>
+<b>Strategy:</b> {{ strategy_name }}
+<b>Time:</b> {{ timestamp }}
+<b>Price:</b> {{ price }}
+
+<b>OHLC:</b>
+Open: {{ open }}
+High: {{ high }}
+Low: {{ low }}
+Close: {{ close }}
+Volume: {{ volume }}
+
+<b>Details:</b> {{ trendline_details | default('Trendline breakout detected') }}
+<b>Indicators:</b> {{ indicators }}
+{% endif %}

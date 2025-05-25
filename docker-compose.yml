@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  kingfisherbot:
+    build: .
+    image: kingfisherbot:latest
+    container_name: kingfisherbot
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_PORT=8080
+      - FLASK_ENV=development
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgres://postgres:postgres@timescaledb:5432/kingfisherdb
+    volumes:
+      # For development, mount the local code to the container
+      - .:/app
+      # Exclude directories that should not be mounted
+      - /app/venv
+      - /app/.git
+      - /app/__pycache__
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: timescaledb
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=admin
+      - POSTGRES_USER=admin
+      - POSTGRES_DB=kingfisherdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    command: postgres -c shared_preload_libraries=timescaledb
+
+volumes:
+  timescale_data:
+    driver: local
