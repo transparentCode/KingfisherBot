@@ -128,6 +128,9 @@ class TrendLineWithBreaks(BaseIndicatorInterface):
         self.logger.info(f"enters the indicator with this df: {data}")
         df = data.copy()
 
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+
         # Get parameters merging instance defaults with kwargs
         numeric_cols = df.select_dtypes(include=['number']).columns
         df[numeric_cols] = df[numeric_cols].astype('float64')

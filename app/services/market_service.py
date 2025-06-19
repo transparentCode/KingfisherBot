@@ -5,11 +5,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-import time
 from datetime import datetime, timedelta
 
 from app.database.db_handler import DBConfig, DBHandler
-from app.exchange.BinanceConnector import BinanceConnector
+from app.exchange.FyersConnector import FyersConnector
 from app.services.calc_scheduler_service import CalcSchedulerService
 from app.services.db_writer_service import DBWriter
 from app.services.indicator_calc_service import IndicatorCalcService
@@ -18,12 +17,14 @@ from app.services.websocket_listener_service import WebSocketListenerService
 
 dotenv = load_dotenv()
 
+
 @dataclass
 class MarketServiceConfig:
     def __init__(self):
         self.logger_name = "app"
         self.assets = os.getenv("ASSETS").split(',')
-        self.previous_days_data = int(os.getenv("PREVIOUS_DAYS_DATA", 30))
+        self.previous_days_data = int(os.getenv("PREVIOUS_DAYS_DATA", 90))
+
 
 async def create_db_pool(config: DBConfig) -> DBHandler:
     handler = DBHandler(config)
@@ -31,19 +32,21 @@ async def create_db_pool(config: DBConfig) -> DBHandler:
     await handler.create_candles_table()
     return handler
 
+
 class MarketService:
     """
     Main system for managing market data and manages all components.
     """
 
     def __init__(self, config: Optional[MarketServiceConfig] = None):
+        self.fyers_auth_pending = None
         self.config = MarketServiceConfig() if config is None else config
         self.logger = logging.getLogger(self.config.logger_name)
         self.assets = self.config.assets
 
         # shared resources
-        self.write_queue = asyncio.Queue()
-        self.calc_queue = asyncio.Queue()
+        self.write_queue = asyncio.Queue(maxsize=10000)
+        self.calc_queue = asyncio.Queue(maxsize=5000)
 
         # components init
         self.db_pool = None
@@ -53,31 +56,91 @@ class MarketService:
         self.scheduler = None
         self.monitor = None
 
+        # Fyers connector instance
+        self.fyers_connector = FyersConnector()
+
         # State tracking
         self.running = False
         self.last_calculation = {asset: 0 for asset in self.assets}
         self.last_update = {asset: 0 for asset in self.assets}
 
-    async def start(self):
-        """
-        Start all its subcomponents.
-        """
-        self.logger.info("Starting MarketService...")
-        self.running = True
+        self.background_tasks = set()
+        self.websocket_tasks = {}
 
-        # Initialize components
+
+    async def start(self):
+        """Initialize and start the market service"""
+        self.logger.info("Starting MarketService...")
+
+        # Start other non-Fyers dependent services
+        await self._start_core_services()
+
+        # Check if Fyers connector is authenticated
+        if not self.fyers_connector.get_access_token():
+            self.logger.warning("Fyers not authenticated. Historical data fetching will be delayed.")
+            self.fyers_auth_pending = True
+        else:
+            self.fyers_auth_pending = False
+            # Proceed with regular initialization
+            await self._initialize_with_historical_data()
+
+        self.running = True
+        self.logger.info("MarketService started")
+
+    async def _initialize_with_historical_data(self):
+        # First fetch historical data for all assets
+        self.logger.info("Fetching historical data for all assets...")
+        fetch_tasks = []
+        for asset in self.assets:
+            # Fetch 90 days of history by default
+            fetch_task = asyncio.create_task(self.fetch_historical_data(asset, days=self.config.previous_days_data,))
+            fetch_tasks.append(fetch_task)
+            # Add delay between starting fetches to avoid API rate limits
+            await asyncio.sleep(5)
+
+        # Wait for all historical data to be fetched
+        if fetch_tasks:
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    self.logger.error(f"Failed to fetch historical data for {self.assets[i]}: {result}")
+                else:
+                    self.logger.info(f"Successfully loaded {result} historical candles for {self.assets[i]}")
+
+        # Start websocket listeners for all assets
+        for asset in self.assets:
+            listener = WebSocketListenerService(
+                symbol=asset,
+                write_queue=self.write_queue,
+                monitor=self.monitor,
+                fyers_connector=self.fyers_connector,
+            )
+            self.websocket_listeners[asset] = listener
+
+            task = asyncio.create_task(listener.start())
+            # Properly track the task
+            self.websocket_tasks[asset] = task
+            self.background_tasks.add(task)
+            task.add_done_callback(self.background_tasks.discard)
+
+    async def _start_core_services(self):
+        # Scale workers based on asset count
+        db_worker_count = min(len(self.assets), 3)  # Max 3, min 1
+        calc_worker_count = min(len(self.assets) * 2, 8)  # 2 per asset, max 8
+
+        """Start core services that don't depend on Fyers authentication"""
         self.db_pool = await create_db_pool(DBConfig())
         self.monitor = MonitoringSystem(self)
         await self.monitor.start()  # Start the monitoring system
 
         # Start components
-        for i in range(4):
+        for i in range(db_worker_count):
             writer = DBWriter(i, self.db_pool, self.write_queue, self.calc_queue)
             writer_task = asyncio.create_task(writer.start())
             self.data_processors.append({"task": writer_task, "service": writer})
             self.logger.info(f"Started DB writer worker {i}")
 
-        for i in range(5):
+        for i in range(calc_worker_count):
             calculator = IndicatorCalcService(
                 calculator_id=i,
                 calc_queue=self.calc_queue,
@@ -93,38 +156,20 @@ class MarketService:
             calc_queue=self.calc_queue,
             last_calculation=self.last_calculation
         )
-        asyncio.create_task(self.scheduler.start())
+        scheduler_task = asyncio.create_task(self.scheduler.start())
 
-        # First fetch historical data for all assets
-        self.logger.info("Fetching historical data for all assets...")
-        fetch_tasks = []
-        for asset in self.assets:
-            # Fetch 30 days of history by default
-            fetch_task = asyncio.create_task(self.fetch_historical_data(asset, days=self.config.previous_days_data,))
-            fetch_tasks.append(fetch_task)
-            # Add delay between starting fetches to avoid API rate limits
-            await asyncio.sleep(1)
+        self.background_tasks.add(scheduler_task)
 
-        # Wait for all historical data to be fetched
-        if fetch_tasks:
-            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    self.logger.error(f"Failed to fetch historical data for {self.assets[i]}: {result}")
-                else:
-                    self.logger.info(f"Successfully loaded {result} historical candles for {self.assets[i]}")
+    async def initialize_after_auth(self):
+        """
+        Initialize the market service after Fyers authentication is complete.
+        This method is called after the user has authenticated with Fyers and the access token is available.
+        """
+        await self._initialize_with_historical_data()
 
-        # Start websocket listeners for all assets
-        for asset in self.assets:
-            listener = WebSocketListenerService(
-                asset=asset,
-                write_queue=self.write_queue,
-                monitor=self.monitor
-            )
-            self.websocket_listeners[asset] = listener
-            asyncio.create_task(listener.start())
-
-        self.logger.info("Market data system started successfully")
+        self.fyers_auth_pending = False
+        self.logger.info("Market service initialized after authentication")
+        return True
 
     async def get_status(self):
         """Return the current status of the market service components."""
@@ -151,91 +196,95 @@ class MarketService:
 
         return status
 
-    async def fetch_historical_data(self, asset: str, days: int = 30):
+    async def fetch_historical_data(self, asset: str, days: int = 60):
         """
-        Fetch historical data for a specific asset and store in database
+        Fetch historical data for a specific asset using Fyers API and store in a database
         """
         self.logger.info(f"Fetching {days} days of historical data for {asset}")
         try:
-            connector = BinanceConnector()
+            # Calculate date range for Fyers API
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
 
-            # Calculate start time (days ago from now in milliseconds
-
-            end_time = int(time.time() * 1000)  # current time in ms
-            start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+            # Format dates for Fyers API (YYYY-MM-DD format)
+            from_date = start_date.strftime("%Y-%m-%d")
+            to_date = end_date.strftime("%Y-%m-%d")
 
             total_candles = 0
-            current_end_time = end_time
-            batch_size = 1000  # Binance API limit per request
 
-            candle_batches = []
+            # Fyers API parameters
+            candle_interval = "1"  # 1 minute
+            date_format = "1"  # Unix timestamp format
 
-            # Fetch data in batches from newest to oldest
-            while current_end_time > start_time:
-                self.logger.debug(
-                    f"Fetching batch for {asset} ending at {datetime.fromtimestamp(current_end_time / 1000)}")
+            self.logger.info(f"Fetching historical data for {asset} from {from_date} to {to_date}")
 
-                # Use run_in_executor to call synchronous method in a separate thread
-                loop = asyncio.get_running_loop()
-                hist_data = await loop.run_in_executor(
-                    None,
-                    lambda: connector.get_historical_futures_klines(
-                        symbol=asset,
-                        interval="1m",
-                        limit=batch_size,
-                        end_time=current_end_time
-                    )
-                )
+            # Use run_in_executor to call synchronous Fyers method in a separate thread
+            loop = asyncio.get_running_loop()
+            hist_data = await loop.run_in_executor(
+                None,
+                lambda: self.fyers_connector.fetch_historical_data(
+                    stock_name=asset,
+                    candle_interval=candle_interval,
+                    date_format=date_format,
+                    from_date=from_date,
+                    to_date=to_date
+                ),
+            )
 
-                if not hist_data or len(hist_data) == 0:
-                    self.logger.warning(f"No more historical data for {asset}")
-                    break
+            if not hist_data or hist_data.get('code') != 200:
+                error_msg = hist_data.get('message', 'Unknown error') if hist_data else 'No data returned'
+                self.logger.error(f"Failed to fetch historical data for {asset}: {error_msg}")
+                return 0
 
-                # Format candles for database
-                candles = []
-                for kline in hist_data:
-                    # Store timestamp as integer (milliseconds)
-                    timestamp_ms = int(kline[0])
+            candles_data = hist_data.get('candles', [])
+            if not candles_data:
+                self.logger.info(f"No historical candles data for {asset}")
+                return 0
+
+            self.logger.info(f"Fetched historical candles for {asset} with size " f"{len(candles_data)} candles")
+
+            # Process candles data from Fyers format
+            # Fyers candles format: [timestamp, open, high, low, close, volume]
+            candles = []
+            for candle_data in candles_data:
+                if len(candle_data) >= 6:
+                    # Convert timestamp to milliseconds if it's in seconds
+                    timestamp = int(candle_data[0])
+                    if timestamp < 10000000000:  # If timestamp is in seconds, convert to milliseconds
+                        timestamp = timestamp * 1000
 
                     candle = {
-                        'timestamp': timestamp_ms,  # Keep as integer timestamp
-                        'open': float(kline[1]),
-                        'high': float(kline[2]),
-                        'low': float(kline[3]),
-                        'close': float(kline[4]),
-                        'volume': float(kline[5]),
-                        'trades': int(kline[8]) if len(kline) > 8 and kline[8] else 0
+                        'symbol': asset,
+                        'timestamp': timestamp,
+                        'open': float(candle_data[1]),
+                        'high': float(candle_data[2]),
+                        'low': float(candle_data[3]),
+                        'close': float(candle_data[4]),
+                        'volume': float(candle_data[5]),
+                        'interval': '1'  # 1 minute interval
                     }
                     candles.append(candle)
 
-                candle_batches.append(candles)
-                total_candles += len(candles)
+            total_candles = len(candles)
 
-                # Set new end time to the oldest candle timestamp minus 1ms
-                if candles:
-                    oldest_timestamp = min(c['timestamp'] for c in candles)
-                    current_end_time = oldest_timestamp - 1
-                else:
-                    break
+            if candles:
+                # Store candles in a database
+                count = await self.db_pool.write_candles(asset, '1', candles)
+                self.logger.info(f"Stored {count} historical candles for {asset}")
 
-                # Add delay to avoid hitting rate limits
-                await asyncio.sleep(0.25)
-
-            # Store all candles in database (from oldest to newest)
-            for batch in reversed(candle_batches):
-                if batch:
-                    count = await self.db_pool.write_candles(asset, '1', batch)
-                    self.logger.info(f"Stored {count} historical candles for {asset}")
-                    await asyncio.sleep(0.1)  # Small delay between database writes
-
-            # Trigger initial calculation
-            await self.calc_queue.put(asset)
+                # Trigger initial calculation
+                await self.calc_queue.put(asset)
+            else:
+                self.logger.warning(f"No valid candles processed for {asset}")
 
             return total_candles
+
         except Exception as e:
             self.logger.error(f"Error fetching historical data for {asset}: {str(e)}")
+            # Log additional details about the error
+            import traceback
+            self.logger.info(f"Full traceback: {traceback.format_exc()}")
             raise
-
 
     async def stop(self):
         self.logger.info("Stopping MarketService...")

@@ -43,7 +43,7 @@ if __name__ == '__main__':
             loop.run_until_complete(market_service.stop())
 
     app.run(
-        debug=True,
+        debug=False,
         host='0.0.0.0', # for docker and podman use 0.0.0.0 (loopback address)
         port=app_port
     )
