@@ -13,6 +13,7 @@ class SimpleMovingAverage(BaseIndicatorInterface):
         self.period = period
         self.input_columns = kwargs.get('input_columns', ['close'])
         self.source = kwargs.get('source', 'close')
+        self.category = 'Moving Average'
 
     def calculate(self, data, **kwargs):
         """
@@ -97,3 +98,61 @@ class SimpleMovingAverage(BaseIndicatorInterface):
         )
 
         return fig
+
+    def get_parameter_schema(self):
+        """
+        Returns the schema for the parameters of this indicator.
+        This is used for UI generation and validation.
+        """
+        return {
+            'name': self.name,
+            'parameters': self._get_default_params(),
+            'category': getattr(self, 'category')
+        }
+
+    def _get_default_params(self):
+        return {
+            'period': {'type': 'int', 'default': 20, 'min': 1, 'max': 100, 'description': 'SMA Length'},
+            'source': {'type': 'select', 'default': 'close', 'options': ['close', 'hlc3', 'hl2', 'ohlc4'],
+                       'description': 'Source'}
+        }
+
+    def _get_plot_trace(self, data, **kwargs):
+        """Return plotly trace for SMA"""
+        period = kwargs.get('period', self.period)
+        source = kwargs.get('source', self.source)
+        column_name = f'sma_{period}_{source}'
+
+        # Ensure the column exists
+        if column_name not in data.columns:
+            # Calculate if not present
+            data = self.calculate(data, **kwargs)
+
+        if column_name not in data.columns:
+            raise ValueError(f"Column {column_name} not found after calculation")
+
+        # Clean data and ensure alignment with original timeframe
+        clean_data = data[[column_name]].dropna()
+
+        # Ensure we don't exceed the original data bounds
+        if len(clean_data) > len(data):
+            clean_data = clean_data.tail(len(data))
+
+        timestamps = clean_data.index.tolist()
+        values = clean_data[column_name].tolist()
+
+        return {
+            'data': [{
+                'x': timestamps,
+                'y': values,
+                'type': 'scatter',
+                'mode': 'lines',
+                'name': f'SMA({period})',
+                'line': {
+                    'color': '#ff6b6b',
+                    'width': 2
+                },
+                'yaxis': 'y'
+            }],
+            'layout_update': {}
+        }

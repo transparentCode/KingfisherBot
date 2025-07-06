@@ -26,7 +26,7 @@ if __name__ == '__main__':
     app_port = int(os.getenv('APP_PORT', 8080))
 
     logging.config.fileConfig('logging.conf', disable_existing_loggers=False)
-    app = create_app()
+    app, socketio = create_app()
 
     app.logger.info('Bot starting.....')
 
@@ -42,8 +42,10 @@ if __name__ == '__main__':
             asyncio.set_event_loop(loop)
             loop.run_until_complete(market_service.stop())
 
-    app.run(
-        debug=True,
+    socketio.run(
+        app,
+        debug=False,
         host='0.0.0.0', # for docker and podman use 0.0.0.0 (loopback address)
-        port=app_port
+        port=app_port,
+        allow_unsafe_werkzeug=True
     )

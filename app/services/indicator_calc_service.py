@@ -175,6 +175,11 @@ class IndicatorCalcService:
                 return
 
             # Calculate trendline indicator
+            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+            for col in numeric_columns:
+                if col in df_tf.columns:
+                    df_tf[col] = pd.to_numeric(df_tf[col], errors='coerce')
+
             trendline_indicator = self.trendline_indicators[timeframe]
             df_with_trendline = trendline_indicator.calculate(df_tf)
 

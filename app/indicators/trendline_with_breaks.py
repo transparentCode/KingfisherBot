@@ -45,6 +45,7 @@ class TrendLineWithBreaks(BaseIndicatorInterface):
         self.down_color = down_color
         self.show_extension = show_extension
         self.logger = logging.getLogger("app")
+        self.category = 'Trendlines'
 
     def _detect_pivot_high(self, data, length):
         """Detect pivot highs using rolling window logic similar to PineScript"""
@@ -274,7 +275,7 @@ class TrendLineWithBreaks(BaseIndicatorInterface):
 
         return df
 
-    def plot1(self, data: pd.DataFrame, **kwargs) -> go.Figure:
+    def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:
         """
         Plot the trendlines and breakouts with improved logic and backpainting.
 
@@ -457,7 +458,7 @@ class TrendLineWithBreaks(BaseIndicatorInterface):
 
         return fig
 
-    def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:
+    def plot1(self, data: pd.DataFrame, **kwargs) -> go.Figure:
         """
         Plot the trendlines and breakouts with price as a line chart.
 
@@ -634,3 +635,132 @@ class TrendLineWithBreaks(BaseIndicatorInterface):
         # fig.update_xaxes(type='category') # Or 'date' if x_axis is datetime
 
         return fig
+
+    def get_parameter_schema(self):
+        """
+        Returns the schema for the parameters of this indicator.
+        This is used for UI generation and validation.
+        """
+        return {
+            'name': self.name,
+            'parameters': self._get_default_params(),
+            'category': getattr(self, 'category')
+        }
+
+    def _get_default_params(self):
+        return {
+            'length': {'type': 'int', 'default': 14, 'min': 1, 'max': 100, 'description': 'Swing detection lookback length'},
+            'multiplier': {'type': 'int', 'default': 1, 'min': 1, 'max': 10, 'description': 'Multiplier for slope calculation'},
+            'calculate_method': {'type': 'select', 'default': 'atr', 'options': ['atr', 'stdev', 'linreg'],
+                        'description': 'Calculation method for slope'},
+            'backpaint': {'type': 'bool', 'default': True, 'options': [True, False], 'description': 'backpainting enable/disable'},
+            'source': {'type': 'select', 'default': 'close', 'options': ['close', 'hlc3', 'hl2', 'ohlc4'],
+                       'description': 'Source'},
+            'upper_color': {'type': 'str', 'default': 'red', 'description': 'colour'},
+            'down_color': {'type': 'str', 'default': 'teal', 'description': 'colour'},
+            'show_extension': {'type': 'bool', 'default': True, 'options': [True, False],
+                          'description': 'showextension enable/disable'}
+        }
+
+    def _get_plot_trace(self, data, **kwargs):
+        """Return plotly trace for TrendLines with Breaks"""
+
+        # Get parameters
+        length = kwargs.get('length', self.length)
+        upper_color = kwargs.get('upper_color', self.upper_color)
+        down_color = kwargs.get('down_color', self.down_color)
+        show_extension = kwargs.get('show_extension', self.show_extension)
+
+        # Required columns for this indicator
+        required_cols = ['plot_upper_final', 'plot_lower_final', 'upbreak_signal', 'downbreak_signal', 'offset']
+
+        # Calculate if columns don't exist
+        if not all(col in data.columns for col in required_cols):
+            data = self.calculate(data, **kwargs)
+
+        if not all(col in data.columns for col in required_cols):
+            raise ValueError(f"Required columns not found after calculation")
+
+        # Clean data and prepare for plotting
+        clean_data = data[required_cols + ['high', 'low']].dropna()
+
+        # Handle offset for plotting
+        offset = data['offset'].iloc[-1] if 'offset' in data.columns and not data.empty else 0
+        timestamps = clean_data.index.tolist()
+
+        traces = []
+
+        # Add Upper Trendline
+        upper_values = clean_data['plot_upper_final'].tolist()
+        traces.append({
+            'x': timestamps,
+            'y': upper_values,
+            'type': 'scatter',
+            'mode': 'lines',
+            'name': f'Upper Trendline',
+            'line': {
+                'color': upper_color,
+                'width': 1.5
+            },
+            'connectgaps': False,
+            'yaxis': 'y'
+        })
+
+        # Add Lower Trendline
+        lower_values = clean_data['plot_lower_final'].tolist()
+        traces.append({
+            'x': timestamps,
+            'y': lower_values,
+            'type': 'scatter',
+            'mode': 'lines',
+            'name': f'Lower Trendline',
+            'line': {
+                'color': down_color,
+                'width': 1.5
+            },
+            'connectgaps': False,
+            'yaxis': 'y'
+        })
+
+        # Add Upbreak signals
+        upbreak_data = data[data['upbreak_signal'] == 1]
+        if not upbreak_data.empty:
+            upbreak_x = upbreak_data.index.tolist()
+            upbreak_y = (upbreak_data['low'] * 0.995).tolist()
+            traces.append({
+                'x': upbreak_x,
+                'y': upbreak_y,
+                'type': 'scatter',
+                'mode': 'markers',
+                'name': 'Upward Break',
+                'marker': {
+                    'symbol': 'triangle-up',
+                    'size': 10,
+                    'color': 'lime'
+                },
+                'yaxis': 'y'
+            })
+
+        # Add Downbreak signals
+        downbreak_data = data[data['downbreak_signal'] == 1]
+        if not downbreak_data.empty:
+            downbreak_x = downbreak_data.index.tolist()
+            downbreak_y = (downbreak_data['high'] * 1.005).tolist()
+            traces.append({
+                'x': downbreak_x,
+                'y': downbreak_y,
+                'type': 'scatter',
+                'mode': 'markers',
+                'name': 'Downward Break',
+                'marker': {
+                    'symbol': 'triangle-down',
+                    'size': 10,
+                    'color': 'red'
+                },
+                'yaxis': 'y'
+            })
+
+        return {
+            'data': traces,
+            'layout_update': {}
+        }

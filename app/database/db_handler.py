@@ -131,41 +131,83 @@ class DBHandler:
 
         try:
             async with self.read_pool.acquire() as conn:
-                query = """
-                SELECT
-                    timestamp as bucket,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume
-                FROM candles
-                WHERE symbol = $1 AND interval = $2
-                """
-                params = [symbol, interval]
-                param_count = 2
+                # Map common interval formats
+                interval_mapping = {
+                    '1m': '1',
+                    '3m': '3',
+                    '5m': '5',
+                    '15m': '15',
+                    '30m': '30',
+                    '1h': '60',
+                    '4h': '240',
+                    '1d': '1440'
+                }
 
-                if start_time:
-                    param_count += 1
-                    query += f" AND timestamp >= ${param_count}"
-                    params.append(start_time)
+                # Use mapped interval or original
+                db_interval = interval_mapping.get(interval, interval)
 
-                if end_time:
-                    param_count += 1
-                    query += f" AND timestamp <= ${param_count}"
-                    params.append(end_time)
+                # Use the working query pattern
+                if start_time or end_time:
+                    # Time-based query
+                    query = """
+                    SELECT
+                        timestamp as bucket,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume
+                    FROM candles
+                    WHERE symbol = $1 AND interval = $2
+                    """
+                    params = [symbol, db_interval]
+                    param_count = 2
 
-                param_count += 1
-                query += f" ORDER BY timestamp DESC"
-                # params.append(limit)
+                    if start_time:
+                        param_count += 1
+                        query += f" AND timestamp >= ${param_count}"
+                        params.append(start_time)
+
+                    if end_time:
+                        param_count += 1
+                        query += f" AND timestamp <= ${param_count}"
+                        params.append(end_time)
+
+                    query += " ORDER BY timestamp DESC"
+
+                    if limit:
+                        param_count += 1
+                        query += f" LIMIT ${param_count}"
+                        params.append(limit)
+
+                else:
+                    # Simple limit-based query
+                    query = """
+                    SELECT
+                        timestamp as bucket,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume
+                    FROM candles
+                    WHERE symbol = $1 AND interval = $2
+                    ORDER BY timestamp DESC
+                    LIMIT $3
+                    """
+                    params = [symbol, db_interval, limit]
+
+                self.logger.debug(f"🔍 Query: {query}")
+                self.logger.debug(f"📊 Params: {params}")
 
                 rows = await conn.fetch(query, *params)
 
-                self.logger.debug(f"Read {len(rows)} candles for symbol {symbol}, interval {interval}")
+                self.logger.debug(f"✅ Found {len(rows)} candles for {symbol} {interval} (db_interval: {db_interval})")
+
                 return rows
 
         except Exception as e:
-            self.logger.error(f"Error reading candles for symbol {symbol}: {str(e)}")
+            self.logger.error(f"❌ Error reading candles for {symbol}: {str(e)}", exc_info=True)
             raise
 
     async def create_candles_table(self):
