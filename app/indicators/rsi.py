@@ -1,139 +1,282 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from numba import njit
 from plotly.subplots import make_subplots
 from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
-import datetime
-
-
-@njit
-def _calculate_qrsi_numba(src: np.ndarray, length: int) -> np.ndarray:
-    """
-    Calculates the Quantum RSI using a Numba-accelerated loop.
-    """
-
-    n = len(src)
-    qrsi_out = np.full(n, np.nan)
-    weights = np.array([np.exp(-np.power((i + 1) / length, 2)) for i in range(length)])
-
-    for i in range(length + 1, n):
-        g = 0.0
-        l = 0.0
-        for j in range(length):
-            # Corresponds to Pine Script's `src[j] - src[j+1]` in its loop
-            diff = src[i - (j + 1)] - src[i - (j + 2)]
-            weight = weights[j]
-            if diff > 0:
-                g += diff * weight
-            else:
-                l += -diff * weight
-
-        net_momentum = g - l
-        total_energy = g + l
-        wave_ratio = net_momentum / total_energy if total_energy != 0 else 0.0
-        qrsi_out[i] = 50.0 + 50.0 * wave_ratio
-
-    return qrsi_out
+from app.utils.price_utils import get_price_source_data
 
 
 class RSI(BaseIndicatorInterface):
     """
-    Gaussian Weighted Relative Strength Index (RSI) indicator.
-
-    This implementation is based on the "Quantum RSI" which uses a Gaussian
-    decay function to weight price momentum. The calculation is performed
-    on a DEMA of the selected source.
+    Relative Strength Index (RSI) indicator.
     """
 
     def __init__(self, name: str = "RSI", **kwargs):
         super().__init__(name, **kwargs)
         self.length = kwargs.get('length', 14)
-        self.ma_length = kwargs.get('ma_length', 5)
-        self.ma_type = kwargs.get('ma_type', "EMA")
-        self.dema_length = kwargs.get('dema_length', 14)
         self.source = kwargs.get('source', 'close')
         self.overbought = kwargs.get('overbought', 70)
         self.oversold = kwargs.get('oversold', 30)
         self.input_columns = ['open', 'high', 'low', 'close']
         self.category = 'Oscillator'
 
-    def _get_source_data(self, data: pd.DataFrame, source: str) -> pd.Series:
-        """Selects the source data series from the dataframe."""
-        if source == 'hlc3':
-            return (data['high'] + data['low'] + data['close']) / 3
-        elif source == 'hl2':
-            return (data['high'] + data['low']) / 2
-        elif source == 'ohlc4':
-            return (data['open'] + data['high'] + data['low'] + data['close']) / 4
-        elif source in data.columns:
-            return data[source]
-        else:
-            raise ValueError(f"Invalid source '{source}'.")
-
-    def _calculate_ma(self, source: pd.Series, length: int, ma_type: str) -> pd.Series:
-        """Calculates a moving average of a given type."""
-        if ma_type == "SMA":
-            return source.rolling(window=length, min_periods=length).mean()
-        elif ma_type == "EMA":
-            return source.ewm(span=length, adjust=False).mean()
-        elif ma_type == "WMA":
-            weights = np.arange(1, length + 1)
-            return source.rolling(window=length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
-        elif ma_type == "SMMA (RMA)":
-            return source.ewm(alpha=1 / length, adjust=False).mean()
-        elif ma_type == "VWMA":
-            raise NotImplementedError("VWMA requires a 'volume' column, which is not provided.")
-        else:
-            raise ValueError(f"Unknown MA type: {ma_type}")
-
     def calculate(self, data: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        """
-        Calculates the Quantum RSI and its moving average.
-        """
+        """Calculate traditional RSI."""
         df = data.copy()
-        source_str = kwargs.get('source', self.source)
-        dema_len = kwargs.get('dema_length', self.dema_length)
-        rsi_len = kwargs.get('length', self.length)
-        ma_len = kwargs.get('ma_length', self.ma_length)
-        ma_t = kwargs.get('ma_type', self.ma_type)
+        source = kwargs.get('source', self.source)
+        length = kwargs.get('length', self.length)
 
-        # 1. Get base source and calculate DEMA
-        source_data = self._get_source_data(df, source_str)
-        ema1 = source_data.ewm(span=dema_len, adjust=False).mean()
-        ema2 = ema1.ewm(span=dema_len, adjust=False).mean()
-        dema_src = 2 * ema1 - ema2
+        # Get source data using utility function
+        source_data = get_price_source_data(df, source)
 
-        # 2. Calculate Quantum RSI
-        qrsi_raw = _calculate_qrsi_numba(dema_src.to_numpy(), rsi_len)
-        df['qrsi'] = pd.Series(qrsi_raw, index=df.index)
+        # Calculate price changes
+        delta = source_data.diff()
 
-        # 3. Smooth RSI and calculate its MA
-        df['qrsi_smoothed'] = df['qrsi'].ewm(span=2, adjust=False).mean()
-        df['qrsi_ma'] = self._calculate_ma(df['qrsi_smoothed'], ma_len, ma_t)
+        # Separate gains and losses
+        gains = delta.where(delta > 0, 0)
+        losses = -delta.where(delta < 0, 0)
+
+        # Calculate average gains and losses using RMA (Wilder's smoothing)
+        avg_gains = gains.ewm(alpha=1 / length, adjust=False).mean()
+        avg_losses = losses.ewm(alpha=1 / length, adjust=False).mean()
+
+        # Calculate RS and RSI
+        rs = np.where(avg_losses == 0, np.nan, avg_gains / avg_losses)
+        rsi = 100 - (100 / (1 + rs))
+
+        # Store result
+        column_name = f'rsi_{length}_{source}'
+        df[column_name] = rsi
 
         return df
 
-    def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:
-        """
-        Plots the Quantum RSI indicator with Plotly.
-        """
-        if 'qrsi_smoothed' not in data.columns or 'qrsi_ma' not in data.columns:
-            raise ValueError("Quantum RSI columns not found. Please run calculate() first.")
+    def _find_pivots(self, data, lookback_left=5, lookback_right=5):
+        """Find pivot highs and lows in the data."""
+        data_array = np.array(data)
+        n = len(data_array)
 
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+        pivot_highs = np.full(n, np.nan)
+        pivot_lows = np.full(n, np.nan)
 
-        # Add Candlestick chart
+        for i in range(lookback_left, n - lookback_right):
+            # Check for pivot high
+            left_slice = data_array[i - lookback_left:i]
+            right_slice = data_array[i + 1:i + lookback_right + 1]
+
+            if (data_array[i] > np.max(left_slice)) and (data_array[i] > np.max(right_slice)):
+                pivot_highs[i] = data_array[i]
+
+            # Check for pivot low
+            if (data_array[i] < np.min(left_slice)) and (data_array[i] < np.min(right_slice)):
+                pivot_lows[i] = data_array[i]
+
+        return pivot_highs, pivot_lows
+
+    def _in_range(self, bars_since, range_lower=5, range_upper=60):
+        """Check if bars since condition is within specified range."""
+        return range_lower <= bars_since <= range_upper
+
+    def detect_divergence(self, data, **kwargs):
+        """
+        Detect RSI divergences based on pivot points.
+        """
+        df = data.copy()
+        length = kwargs.get('length', self.length)
+        source = kwargs.get('source', self.source)
+        lookback_left = kwargs.get('lookback_left', 5)
+        lookback_right = kwargs.get('lookback_right', 5)
+        range_upper = kwargs.get('range_upper', 60)
+        range_lower = kwargs.get('range_lower', 5)
+
+        rsi_column = f'rsi_{length}_{source}'
+
+        # Ensure RSI is calculated
+        if rsi_column not in df.columns:
+            df = self.calculate(df, **kwargs)
+
+        # Initialize divergence columns
+        df['bullish_divergence'] = False
+        df['bearish_divergence'] = False
+        df['divergence_signal'] = 0
+
+        # Get data arrays
+        rsi_values = df[rsi_column].fillna(method='bfill').fillna(method='ffill').values
+        high_values = df['high'].values
+        low_values = df['low'].values
+
+        # Find pivot points for RSI and price
+        rsi_pivot_highs, rsi_pivot_lows = self._find_pivots(rsi_values, lookback_left, lookback_right)
+        price_pivot_highs, _ = self._find_pivots(high_values, lookback_left, lookback_right)
+        _, price_pivot_lows = self._find_pivots(low_values, lookback_left, lookback_right)
+
+        # Get valid pivot indices
+        rsi_high_indices = np.where(~np.isnan(rsi_pivot_highs))[0]
+        rsi_low_indices = np.where(~np.isnan(rsi_pivot_lows))[0]
+        price_high_indices = np.where(~np.isnan(price_pivot_highs))[0]
+        price_low_indices = np.where(~np.isnan(price_pivot_lows))[0]
+
+        # Detect bullish divergence (RSI higher low + Price lower low)
+        for i in range(1, len(rsi_low_indices)):
+            current_idx = rsi_low_indices[i]
+
+            # Find corresponding previous pivot within range
+            for j in range(i - 1, -1, -1):
+                previous_idx = rsi_low_indices[j]
+                bars_since = current_idx - previous_idx
+
+                if self._in_range(bars_since, range_lower, range_upper):
+                    # Check if we have corresponding price pivots
+                    current_price_idx = None
+                    previous_price_idx = None
+
+                    # Find closest price pivot lows
+                    for price_idx in price_low_indices:
+                        if abs(price_idx - current_idx) <= lookback_right:
+                            current_price_idx = price_idx
+                            break
+
+                    for price_idx in price_low_indices:
+                        if abs(price_idx - previous_idx) <= lookback_right:
+                            previous_price_idx = price_idx
+                            break
+
+                    if current_price_idx is not None and previous_price_idx is not None:
+                        # RSI higher low AND price lower low
+                        rsi_higher_low = rsi_values[current_idx] > rsi_values[previous_idx]
+                        price_lower_low = low_values[current_price_idx] < low_values[previous_price_idx]
+
+                        if rsi_higher_low and price_lower_low:
+                            df.iloc[current_idx, df.columns.get_loc('bullish_divergence')] = True
+                            df.iloc[current_idx, df.columns.get_loc('divergence_signal')] = 1
+                            break
+
+        # Detect bearish divergence (RSI lower high + Price higher high)
+        for i in range(1, len(rsi_high_indices)):
+            current_idx = rsi_high_indices[i]
+
+            # Find corresponding previous pivot within range
+            for j in range(i - 1, -1, -1):
+                previous_idx = rsi_high_indices[j]
+                bars_since = current_idx - previous_idx
+
+                if self._in_range(bars_since, range_lower, range_upper):
+                    # Check if we have corresponding price pivots
+                    current_price_idx = None
+                    previous_price_idx = None
+
+                    # Find closest price pivot highs
+                    for price_idx in price_high_indices:
+                        if abs(price_idx - current_idx) <= lookback_right:
+                            current_price_idx = price_idx
+                            break
+
+                    for price_idx in price_high_indices:
+                        if abs(price_idx - previous_idx) <= lookback_right:
+                            previous_price_idx = price_idx
+                            break
+
+                    if current_price_idx is not None and previous_price_idx is not None:
+                        # RSI lower high AND price higher high
+                        rsi_lower_high = rsi_values[current_idx] < rsi_values[previous_idx]
+                        price_higher_high = high_values[current_price_idx] > high_values[previous_price_idx]
+
+                        if rsi_lower_high and price_higher_high:
+                            df.iloc[current_idx, df.columns.get_loc('bearish_divergence')] = True
+                            df.iloc[current_idx, df.columns.get_loc('divergence_signal')] = -1
+                            break
+
+        return df
+
+    def plot_with_divergence(self, data: pd.DataFrame, **kwargs) -> go.Figure:
+        """Plot RSI with divergence signals."""
+        # First detect divergences
+        df = self.detect_divergence(data, **kwargs)
+
+        length = kwargs.get('length', self.length)
+        source = kwargs.get('source', self.source)
+        column_name = f'rsi_{length}_{source}'
+
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+                            row_heights=[0.7, 0.3])
+
+        # Add candlestick chart
         fig.add_trace(go.Candlestick(
-            x=data.index, open=data['open'], high=data['high'], low=data['low'], close=data['close'], name='Price'
+            x=df['open_time'] if 'open_time' in df.columns else df.index,
+            open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+            name='Price'
         ), row=1, col=1)
 
-        # Add RSI lines
+        # Add RSI line
         fig.add_trace(go.Scatter(
-            x=data.index, y=data['qrsi_smoothed'], name='Quantum RSI', line=dict(color='#D40CC2', width=1.5)
+            x=df['open_time'] if 'open_time' in df.columns else df.index,
+            y=df[column_name],
+            name=f'RSI({length})',
+            line=dict(color='#D40CC2', width=2)
         ), row=2, col=1)
+
+        # Add divergence signals
+        bullish_signals = df[df['bullish_divergence'] == True]
+        bearish_signals = df[df['bearish_divergence'] == True]
+
+        if not bullish_signals.empty:
+            fig.add_trace(go.Scatter(
+                x=bullish_signals['open_time'] if 'open_time' in df.columns else bullish_signals.index,
+                y=bullish_signals[column_name],
+                mode='markers',
+                marker=dict(color='green', size=10, symbol='triangle-up'),
+                name='Bullish Divergence'
+            ), row=2, col=1)
+
+        if not bearish_signals.empty:
+            fig.add_trace(go.Scatter(
+                x=bearish_signals['open_time'] if 'open_time' in df.columns else bearish_signals.index,
+                y=bearish_signals[column_name],
+                mode='markers',
+                marker=dict(color='red', size=10, symbol='triangle-down'),
+                name='Bearish Divergence'
+            ), row=2, col=1)
+
+        # Add level lines
+        fig.add_hline(y=self.overbought, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=self.oversold, line_dash="dash", line_color="green", row=2, col=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="grey", row=2, col=1)
+
+        fig.update_layout(
+            title_text=f"RSI({length}) with Divergence Analysis",
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=800
+        )
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+
+        return fig
+
+    def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:
+        """Plot RSI indicator."""
+        length = kwargs.get('length', self.length)
+        source = kwargs.get('source', self.source)
+        column_name = f'rsi_{length}_{source}'
+
+        if column_name not in data.columns:
+            raise ValueError(f"RSI column {column_name} not found. Please run calculate() first.")
+
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+                            row_heights=[0.7, 0.3])
+
+        # Add candlestick chart
+        fig.add_trace(go.Candlestick(
+            x=data['open_time'] if 'open_time' in data.columns else data.index,
+            open=data['open'], high=data['high'], low=data['low'], close=data['close'],
+            name='Price'
+        ), row=1, col=1)
+
+        # Add RSI line
         fig.add_trace(go.Scatter(
-            x=data.index, y=data['qrsi_ma'], name=f'RSI MA({self.ma_length})', line=dict(color='#3AFFa3', width=1.5)
+            x=data['open_time'] if 'open_time' in data.columns else data.index,
+            y=data[column_name],
+            name=f'RSI({length})',
+            line=dict(color='#D40CC2', width=2)
         ), row=2, col=1)
 
         # Add level lines
@@ -141,23 +284,8 @@ class RSI(BaseIndicatorInterface):
         fig.add_hline(y=self.oversold, line_dash="dash", line_color="green", row=2, col=1)
         fig.add_hline(y=50, line_dash="dot", line_color="grey", row=2, col=1)
 
-        # Add fills for overbought and oversold zones
-        y_over = np.where(data['qrsi_smoothed'] >= self.overbought, data['qrsi_smoothed'], self.overbought)
-        y_under = np.where(data['qrsi_smoothed'] <= self.oversold, data['qrsi_smoothed'], self.oversold)
-
-        fig.add_trace(go.Scatter(
-            x=data.index, y=y_over,
-            fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)',
-            line=dict(width=0), showlegend=False
-        ), row=2, col=1)
-        fig.add_trace(go.Scatter(
-            x=data.index, y=y_under,
-            fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)',
-            line=dict(width=0), showlegend=False
-        ), row=2, col=1)
-
         fig.update_layout(
-            title_text=f"{self.name} ({self.length}) Analysis",
+            title_text=f"RSI({length}) Analysis",
             xaxis_rangeslider_visible=False,
             template="plotly_dark",
             height=800
@@ -168,92 +296,46 @@ class RSI(BaseIndicatorInterface):
         return fig
 
     def get_parameter_schema(self):
-        """
-        Returns the schema for the parameters of this indicator.
-        This is used for UI generation and validation.
-        """
+        """Returns parameter schema for UI generation."""
         return {
             'name': self.name,
             'parameters': self._get_default_params(),
-            'category': getattr(self, 'category', 'Oscillator')
+            'category': self.category
         }
 
     def _get_default_params(self):
         return {
             'length': {'type': 'int', 'default': 14, 'min': 1, 'max': 100, 'description': 'RSI Period'},
-            'ma_length': {'type': 'int', 'default': 5, 'min': 1, 'max': 100, 'description': 'MA Length'},
-            'ma_type': {'type': 'select', 'default': 'EMA', 'options': ['SMA', 'EMA', 'WMA', 'SMMA (RMA)'],
-                        'description': 'MA Type'},
-            'dema_length': {'type': 'int', 'default': 14, 'min': 1, 'max': 100, 'description': 'DEMA Length'},
             'source': {'type': 'select', 'default': 'close', 'options': ['close', 'hlc3', 'hl2', 'ohlc4'],
                        'description': 'Source'},
             'overbought': {'type': 'float', 'default': 70, 'min': 50, 'max': 100, 'description': 'Overbought Level'},
-            'oversold': {'type': 'float', 'default': 30, 'min': 0, 'max': 50, 'description': 'Oversold Level'}
+            'oversold': {'type': 'float', 'default': 30, 'min': 0, 'max': 50, 'description': 'Oversold Level'},
+            'lookback_left': {'type': 'int', 'default': 5, 'min': 1, 'max': 20, 'description': 'Pivot Lookback Left'},
+            'lookback_right': {'type': 'int', 'default': 5, 'min': 1, 'max': 20, 'description': 'Pivot Lookback Right'},
+            'range_upper': {'type': 'int', 'default': 60, 'min': 10, 'max': 200,
+                            'description': 'Max Bars Between Pivots'},
+            'range_lower': {'type': 'int', 'default': 5, 'min': 1, 'max': 50, 'description': 'Min Bars Between Pivots'}
         }
 
     def _get_plot_trace(self, data, **kwargs):
-        """Generate plot trace for RSI indicator"""
-        if data.empty:
-            return []
+        """Generate plot trace for RSI indicator."""
+        length = kwargs.get('length', self.length)
+        source = kwargs.get('source', self.source)
+        column_name = f'rsi_{length}_{source}'
 
-        # Check which RSI columns are available
-        available_columns = []
-        if 'qrsi_smoothed' in data.columns:
-            available_columns.append('qrsi_smoothed')
-        if 'qrsi_ma' in data.columns:
-            available_columns.append('qrsi_ma')
-        if 'qrsi' in data.columns and 'qrsi_smoothed' not in data.columns:
-            available_columns.append('qrsi')
+        if column_name not in data.columns:
+            data = self.calculate(data, **kwargs)
 
-        if not available_columns:
-            return []
+        clean_data = data[[column_name]].dropna()
 
-        # Use the base class method to clean data for JSON serialization
-        clean_data = self._clean_data_for_json(data, available_columns)
-
-        if not clean_data or 'timestamps' not in clean_data:
-            return []
-
-        timestamps = clean_data['timestamps']
-        traces = []
-
-        # Main RSI line (qrsi_smoothed or qrsi)
-        main_column = 'qrsi_smoothed' if 'qrsi_smoothed' in clean_data else 'qrsi'
-        if main_column in clean_data:
-            traces.append({
-                'x': timestamps,
-                'y': clean_data[main_column],
-                'type': 'scatter',
-                'mode': 'lines',
-                'name': f'RSI({self.length})',
-                'line': {
-                    'color': '#D40CC2',
-                    'width': 2
-                },
-                'showlegend': True
-                # 'yaxis' property removed
-            })
-
-        # Add RSI MA line if available
-        if 'qrsi_ma' in clean_data:
-            traces.append({
-                'x': timestamps,
-                'y': clean_data['qrsi_ma'],
-                'type': 'scatter',
-                'mode': 'lines',
-                'name': f'RSI MA({self.ma_length})',
-                'line': {
-                    'color': '#3AFFa3',
-                    'width': 1.5
-                },
-                'showlegend': True
-                # 'yaxis' property removed
-            })
-
-        # The reference lines for overbought/oversold are better handled
-        # by the frontend's getSubplotAxisConfig function using layout.shapes,
-        # but if you must send them as traces, remove the yaxis property here too.
-        # It's recommended to remove these from here to avoid clutter.
-
-        return traces
-
+        return [{
+            'x': clean_data.index.tolist(),
+            'y': clean_data[column_name].tolist(),
+            'type': 'scatter',
+            'mode': 'lines',
+            'name': f'RSI({length})',
+            'line': {
+                'color': '#D40CC2',
+                'width': 2
+            }
+        }]

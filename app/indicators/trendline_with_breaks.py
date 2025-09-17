@@ -9,7 +9,7 @@ from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
 
 class TrendLineWithBreaks(BaseIndicatorInterface):
     """
-    TrendLine with break indicator - Improved version closer to PineScript logic.
+    TrendLine with break indicator.
     """
 
     def __init__(self, name="TrendLineWithBreaks",

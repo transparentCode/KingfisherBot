@@ -1,14 +1,15 @@
-import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 
 from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
+import plotly.graph_objs as go
+
 from app.utils.price_utils import get_price_source_data
 
 
-class SimpleMovingAverage(BaseIndicatorInterface):
-    """Simple Moving Average (SMA) indicator."""
+class ExponentialMovingAverage(BaseIndicatorInterface):
+    """Exponential Moving Average (EMA) indicator."""
 
-    def __init__(self, name: str = "SimpleMovingAverage", period: int = 20, **kwargs):
+    def __init__(self, name: str = "ExponentialMovingAverage", period: int = 20, **kwargs):
         super().__init__(name)
         self.name = name
         self.period = period
@@ -18,7 +19,7 @@ class SimpleMovingAverage(BaseIndicatorInterface):
 
     def calculate(self, data, **kwargs):
         """
-        Calculate Simple Moving Average on the specified data source.
+        Calculate Exponential Moving Average on the specified data source.
 
         Supports various price inputs:
         - single column: 'close', 'open', 'high', 'low', etc.
@@ -26,7 +27,7 @@ class SimpleMovingAverage(BaseIndicatorInterface):
 
         :param data: DataFrame containing price data
         :param kwargs: Optional arguments to override class settings
-        :return: DataFrame with SMA values added
+        :return: DataFrame with EMA values added
         """
         source = kwargs.get('source', self.source)
         period = kwargs.get('period', self.period)
@@ -34,26 +35,26 @@ class SimpleMovingAverage(BaseIndicatorInterface):
         # Create the source series based on the input type
         source_data = get_price_source_data(data, source)
 
-        # Calculate SMA
-        column_name = f'sma_{period}_{source}'
-        data[column_name] = source_data.rolling(window=period).mean()
+        # Calculate EMA
+        column_name = f'ema_{period}_{source}'
+        data[column_name] = source_data.ewm(span=period, adjust=False).mean()
 
         return data
 
     def plot(self, data, **kwargs):
         """
-        Plot the Simple Moving Average on the provided data.
+        Plot the Exponential Moving Average on the provided data.
 
-        :param data: DataFrame containing price data and calculated SMA
+        :param data: DataFrame containing price data and calculated EMA
         :param kwargs: Optional parameters for plotting
         """
 
-        if (data is None) or (kwargs.get("column_name", 'sma_20_close') not in data.columns):
+        if (data is None) or (kwargs.get("column_name", 'ema_20_close') not in data.columns):
             raise ValueError("Data is required for plotting")
 
-        column_name = kwargs.get("column_name", 'sma_20_close')
+        column_name = kwargs.get("column_name", 'ema_20_close')
 
-        fig = make_subplots(rows= 1, cols=1, shared_xaxes=True, vertical_spacing=0.02, subplot_titles=f"{self.name} Plot")
+        fig = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.02, subplot_titles=f"{self.name} Plot")
 
         fig.add_trace(
             go.Candlestick(
@@ -72,8 +73,8 @@ class SimpleMovingAverage(BaseIndicatorInterface):
                 x=data['open_time'] if 'open_time' in data.columns else data.index,
                 y=data[column_name],
                 mode='lines',
-                line=dict(color='red', width=1),
-                name=f"SMA {self.period} ({self.source})"
+                line=dict(color='blue', width=1),
+                name=f"EMA {self.period} ({self.source})"
             ),
             row=1, col=1
         )
@@ -102,16 +103,16 @@ class SimpleMovingAverage(BaseIndicatorInterface):
 
     def _get_default_params(self):
         return {
-            'period': {'type': 'int', 'default': 20, 'min': 1, 'max': 100, 'description': 'SMA Length'},
+            'period': {'type': 'int', 'default': 20, 'min': 1, 'max': 100, 'description': 'EMA Length'},
             'source': {'type': 'select', 'default': 'close', 'options': ['close', 'hlc3', 'hl2', 'ohlc4'],
                        'description': 'Source'}
         }
 
     def _get_plot_trace(self, data, **kwargs):
-        """Return plotly trace for SMA"""
+        """Return plotly trace for EMA"""
         period = kwargs.get('period', self.period)
         source = kwargs.get('source', self.source)
-        column_name = f'sma_{period}_{source}'
+        column_name = f'ema_{period}_{source}'
 
         # Ensure the column exists
         if column_name not in data.columns:
@@ -137,9 +138,9 @@ class SimpleMovingAverage(BaseIndicatorInterface):
                 'y': values,
                 'type': 'scatter',
                 'mode': 'lines',
-                'name': f'SMA({period})',
+                'name': f'EMA({period})',
                 'line': {
-                    'color': '#ff6b6b',
+                    'color': '#4ecdc4',
                     'width': 2
                 },
                 'yaxis': 'y'

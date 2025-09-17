@@ -3,6 +3,7 @@ import numpy as np
 import plotly.graph_objects as go
 from numba import njit, float64, boolean
 from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
+from app.utils.price_utils import get_price_source_data
 
 
 @njit
@@ -58,24 +59,26 @@ class StudentTSuperTrend(BaseIndicatorInterface):
 
     def __init__(self, name: str = "StudentTSuperTrend", **kwargs):
         super().__init__(name, **kwargs)
-        self.atr_len = kwargs.get('atrLen', 10)
-        self.atr_mult = kwargs.get('atrMult', 3.0)
+        self.atr_len = kwargs.get('atr_len', kwargs.get('atrLen', 10))
+        self.atr_mult = kwargs.get('atr_mult', kwargs.get('atrMult', 3.0))
         self.span = kwargs.get('span', 14)
         self.nu = kwargs.get('nu', 3.0)
-        self.vol_window = kwargs.get('volWindow', 30)
-        self.gamma = kwargs.get('gamma', 1.0)
-        self.alpha_floor = kwargs.get('alphaFloor', 0.03)
-        self.robust_atr = kwargs.get('robustATR_on', True)
-        self.input_columns = ['high', 'low', 'close']
+        self.vol_window = kwargs.get('vol_window', kwargs.get('volWindow', 30))
+        self.gamma = kwargs.get('gamma', 1.2)
+        self.alpha_floor = kwargs.get('alpha_floor', kwargs.get('alphaFloor', 0.03))
+        self.robust_atr = kwargs.get('robust_atr', kwargs.get('robustATR_on', True))
+        self.input_columns = ['high', 'low', 'close', 'open']
         self.category = 'Trend Indicators'
 
-    def _calculate_adaptive_alpha(self, series: pd.Series, base_alpha: float) -> pd.Series:
-        """Calculates the adaptive alpha based on Student-t distribution."""
+    def _calculate_adaptive_alpha(self, series, base_alpha):
         r = series.pct_change().fillna(0)
-        sigma = r.rolling(window=self.vol_window).std().fillna(1e-10)
-        alpha_raw = base_alpha / (1 + np.power(np.abs(r / sigma), self.nu))
-        alpha_p = (self.gamma * alpha_raw).clip(lower=self.alpha_floor, upper=1.0)
-        return alpha_p
+        sigma = r.rolling(self.vol_window).std().fillna(1e-6)
+
+        vol_pct = sigma.rank(pct=True) * 100
+        nu_dyn = np.where(vol_pct > 70, self.nu * 0.7, np.where(vol_pct < 30, self.nu * 1.3, self.nu))
+
+        alpha_raw = base_alpha / (1 + np.abs(r / sigma) ** nu_dyn)
+        return (self.gamma * alpha_raw).clip(lower=self.alpha_floor, upper=1.0)
 
     def calculate(self, data: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """
@@ -86,8 +89,13 @@ class StudentTSuperTrend(BaseIndicatorInterface):
         """
         df = data.copy()
 
+        # Get parameters with proper fallbacks
+        atr_len = kwargs.get('atr_len', self.atr_len)
+        atr_mult = kwargs.get('atr_mult', self.atr_mult)
+        span = kwargs.get('span', self.span)
+
         # 1. t-EMA Calculation
-        base_alpha_ema = 2.0 / (self.span + 1.0)
+        base_alpha_ema = 2.0 / (span + 1.0)
         alpha_p_ema = self._calculate_adaptive_alpha(df['close'], base_alpha_ema)
         df['t_ema'] = _calculate_t_ema(df['close'].to_numpy(), alpha_p_ema.to_numpy())
 
@@ -98,26 +106,31 @@ class StudentTSuperTrend(BaseIndicatorInterface):
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
         if self.robust_atr:
-            base_alpha_atr = 2.0 / (self.atr_len + 1.0)
+            base_alpha_atr = 2.0 / (atr_len + 1.0)
             alpha_p_atr = self._calculate_adaptive_alpha(tr, base_alpha_atr)
             atr = _calculate_t_ema(tr.to_numpy(), alpha_p_atr.to_numpy())
         else:
-            atr = tr.ewm(span=self.atr_len, adjust=False).mean().to_numpy()
+            atr = tr.ewm(span=atr_len, adjust=False).mean().to_numpy()
 
-        df['atr'] = atr
+        price_eps = df['close'] * 0.0001
+        df['atr'] = np.maximum(atr, price_eps.to_numpy())
 
         # 3. SuperTrend Core Calculation
-        hlcc4 = (df['high'] + df['low'] + df['close'] + df['close']) / 4
-        upper_band = hlcc4 + self.atr_mult * df['atr']
-        lower_band = hlcc4 - self.atr_mult * df['atr']
+        source = get_price_source_data(df, 'hlcc4')
+        upper_band = source + atr_mult * df['atr']
+        lower_band = source - atr_mult * df['atr']
 
         st, direction = _calculate_supertrend(
             df['close'].to_numpy(),
             upper_band.to_numpy(),
             lower_band.to_numpy()
         )
+
+        # Use consistent column naming for both legacy and new format
         df['supertrend'] = st
         df['direction'] = direction
+        df[f'supertrend_{atr_len}_{atr_mult}'] = st
+        df[f'trend_{atr_len}_{atr_mult}'] = direction.astype(int) * 2 - 1  # Convert to 1/-1
 
         return df
 
@@ -199,29 +212,39 @@ class StudentTSuperTrend(BaseIndicatorInterface):
 
     def _get_default_params(self):
         return {
-            'atr_len': {'type': 'int', 'default': 10, 'min': 2, 'max': 100, 'description': 'atr length'},
-            'atr_mult': {'type': 'int', 'default': 3, 'min': 2, 'max': 100, 'description': 'atr multiplier'},
-            'source': {'type': 'select', 'default': 'close', 'options': ['close', 'hlc3', 'hl2', 'ohlc4'],
-                       'description': 'Source'},
-            'span': {'type': 'int', 'default': '14', 'min': 1, 'max': 100, 'description': 'tema-0 length'}
+            'atr_len': {'type': 'int', 'default': 10, 'min': 2, 'max': 100, 'description': 'ATR Length'},
+            'atr_mult': {'type': 'float', 'default': 3.0, 'min': 1.0, 'max': 10.0, 'description': 'ATR Multiplier'},
+            'span': {'type': 'int', 'default': 14, 'min': 1, 'max': 100, 'description': 'T-EMA Span'},
+            'nu': {'type': 'float', 'default': 3.0, 'min': 1.0, 'max': 10.0, 'description': 'Student-t Nu Parameter'},
+            'vol_window': {'type': 'int', 'default': 30, 'min': 5, 'max': 100, 'description': 'Volatility Window'},
+            'gamma': {'type': 'float', 'default': 1.2, 'min': 0.1, 'max': 5.0, 'description': 'Gamma Parameter'},
+            'alpha_floor': {'type': 'float', 'default': 0.03, 'min': 0.01, 'max': 0.5, 'description': 'Alpha Floor'},
+            'robust_atr': {'type': 'bool', 'default': True, 'description': 'Use Robust ATR'}
         }
 
     def _get_plot_trace(self, data, **kwargs):
         """Return plotly trace for Supertrend"""
-        import plotly.graph_objs as go
+        atr_len = kwargs.get('atr_len', self.atr_len)
+        atr_mult = kwargs.get('atr_mult', self.atr_mult)
 
-        period = kwargs.get('period', self.period)
-        multiplier = kwargs.get('multiplier', self.multiplier)
+        # Use the legacy column names that are actually created
+        supertrend_col = 'supertrend'
+        direction_col = 'direction'
 
-        supertrend_col = f'supertrend_{period}_{multiplier}'
-        trend_col = f'trend_{period}_{multiplier}'
+        # Calculate if columns don't exist
+        if supertrend_col not in data.columns or direction_col not in data.columns:
+            data = self.calculate(data, **kwargs)
 
-        if supertrend_col not in data.columns or trend_col not in data.columns:
+        if supertrend_col not in data.columns or direction_col not in data.columns:
             raise ValueError(f"Supertrend columns not found in data")
 
         # Create traces for bullish and bearish trends
-        bullish_data = data[data[trend_col] == 1]
-        bearish_data = data[data[trend_col] == -1]
+        # Convert boolean direction to proper format
+        bullish_mask = data[direction_col] == True
+        bearish_mask = data[direction_col] == False
+
+        bullish_data = data[bullish_mask]
+        bearish_data = data[bearish_mask]
 
         traces = []
 
@@ -251,6 +274,4 @@ class StudentTSuperTrend(BaseIndicatorInterface):
                 }
             })
 
-        return {
-            'data': traces
-        }
+        return traces

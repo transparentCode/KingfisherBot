@@ -146,7 +146,7 @@ class DBHandler:
                 # Use mapped interval or original
                 db_interval = interval_mapping.get(interval, interval)
 
-                # Use the working query pattern
+                # Use the workng query pattern
                 if start_time or end_time:
                     # Time-based query
                     query = """
