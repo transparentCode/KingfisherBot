@@ -5,7 +5,7 @@ from threading import Thread
 
 from dotenv import load_dotenv
 from app import create_app
-from app.services import IndicatorRegisters
+from app.services import IndicatorRegistry
 import atexit
 
 from app.services.market_service import MarketService
@@ -30,7 +30,7 @@ if __name__ == '__main__':
 
     app.logger.info('Bot starting.....')
 
-    IndicatorRegisters.register_indicators()
+    IndicatorRegistry.register_default_indicators()
 
     market_thread = Thread(target=run_market_service, daemon=True)
     market_thread.start()

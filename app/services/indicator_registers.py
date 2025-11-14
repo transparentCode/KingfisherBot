@@ -203,13 +203,13 @@ class IndicatorRegistry:
             return registry
 
         default_indicators = [
-            {
-                'indicator_id': 'SMA',
-                'display_name': 'Simple Moving Average',
-                'class_ref': SimpleMovingAverage,
-                'description': 'Basic moving average indicator',
-                'category': 'Moving Averages'
-            },
+            # {
+            #     'indicator_id': 'SMA',
+            #     'display_name': 'Simple Moving Average',
+            #     'class_ref': SimpleMovingAverage,
+            #     'description': 'Basic moving average indicator',
+            #     'category': 'Moving Averages'
+            # },
             {
                 'indicator_id': 'EMA',
                 'display_name': 'Exponential Moving Average',
@@ -230,6 +230,13 @@ class IndicatorRegistry:
                 'class_ref': StudentTSuperTrend,
                 'description': 'Trend-following indicator based on ATR',
                 'category': 'Trend Analysis'
+            },
+            {
+                'indicator_id': 'TrendLineWithBreaks',
+                'display_name': 'Trend Line with Breaks',
+                'class_ref': TrendLineWithBreaks,
+                'description': 'Dynamic trend lines that adapt to price breaks',
+                'category': 'Trendlines'
             }
         ]
 

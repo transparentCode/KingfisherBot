@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from app.database.db_handler import DBHandler
+from app.db.db_handler import DBHandler
 import pandas as pd
 from datetime import datetime, timedelta
 import logging

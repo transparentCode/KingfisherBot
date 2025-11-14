@@ -1,3 +1,4 @@
+from app.db.redis_handler import RedisHandler
 import asyncio
 import logging
 import os
@@ -8,13 +9,15 @@ from dotenv import load_dotenv
 import time
 from datetime import datetime, timedelta
 
-from app.database.db_handler import DBConfig, DBHandler
+from app.db.db_handler import DBConfig, DBHandler
 from app.exchange.BinanceConnector import BinanceConnector
+from app.services import IndicatorRegistry
 from app.services.calc_scheduler_service import CalcSchedulerService
 from app.services.db_writer_service import DBWriter
 from app.services.indicator_calc_service import IndicatorCalcService
 from app.services.monitoring_service import MonitoringSystem
 from app.services.websocket_listener_service import WebSocketListenerService
+from config.asset_indicator_config import ConfigurationManager
 
 dotenv = load_dotenv()
 
@@ -40,6 +43,8 @@ class MarketService:
         self.config = MarketServiceConfig() if config is None else config
         self.logger = logging.getLogger(self.config.logger_name)
         self.assets = self.config.assets
+        self.config_manager = ConfigurationManager()
+        self.redis_handler = RedisHandler()
 
         # shared resources
         self.write_queue = asyncio.Queue()
@@ -58,12 +63,112 @@ class MarketService:
         self.last_calculation = {asset: 0 for asset in self.assets}
         self.last_update = {asset: 0 for asset in self.assets}
 
+    def _log_configuration_summary(self):
+        """Log detailed configuration summary at startup"""
+        try:
+            self.logger.info("=== Configuration Summary ===")
+            
+            summary = self.config_manager.get_configuration_summary()
+            
+            self.logger.info(f"Total Assets: {summary['total_assets']}")
+            self.logger.info(f"Enabled Assets: {summary['enabled_assets']}")
+            self.logger.info(f"Disabled Assets: {summary['disabled_assets']}")
+            self.logger.info(f"Regime Adaptation Global: {'ON' if summary['regime_adaptation_global'] else 'OFF'}")
+            self.logger.info(f"Regime Enabled Assets: {summary['regime_enabled_assets']}")
+            self.logger.info(f"Runtime Overrides: {summary['runtime_overrides_count']} ({summary['runtime_overrides_assets']})")
+            self.logger.info(f"Config Directory: {summary['config_dir']}")
+            self.logger.info(f"Last Reload: {summary['last_reload']}")
+            
+            # Global configuration details
+            global_config = summary.get('global_config', {})
+            if global_config:
+                regime = global_config.get('regime_adaptation', {})
+                self.logger.info(f"Global Regime Settings: enabled={regime.get('enabled', False)}, interval={regime.get('update_interval', 'N/A')}")
+                
+                timeframes = global_config.get('default_timeframes', [])
+                self.logger.info(f"Default Timeframes: {timeframes}")
+                
+                calc_settings = global_config.get('calculation_settings', {})
+                self.logger.info(f"Calculation Settings: parallel={calc_settings.get('parallel_processing', False)}, workers={calc_settings.get('max_workers', 1)}")
+            
+            # Detailed asset configurations
+            asset_details = summary.get('asset_details', {})
+            if asset_details:
+                self.logger.info("=== Asset Configurations ===")
+                for asset, config in asset_details.items():
+                    self.logger.info(f"Asset: {asset}")
+                    self.logger.info(f"  - Enabled: {config.get('enabled', True)}")
+                    self.logger.info(f"  - Regime Adaptation: {config.get('regime_adaptation_enabled', True)}")
+                    
+                    # MA configs
+                    ma_configs = config.get('ma_configs', {})
+                    if ma_configs:
+                        self.logger.info(f"  - MA Configs: {ma_configs}")
+                    
+                    # SuperTrend configs
+                    st_configs = config.get('supertrend_configs', {})
+                    if st_configs:
+                        self.logger.info(f"  - SuperTrend Configs: {st_configs}")
+                    
+                    # Oscillator configs
+                    osc_configs = config.get('oscillator_configs', {})
+                    if osc_configs:
+                        self.logger.info(f"  - Oscillator Configs: {osc_configs}")
+                    
+                    # Timeframe overrides
+                    tf_overrides = config.get('timeframe_overrides', {})
+                    if tf_overrides:
+                        self.logger.info(f"  - Timeframe Overrides: {tf_overrides}")
+            
+            # Runtime override details
+            runtime_details = summary.get('runtime_override_details', {})
+            if runtime_details:
+                self.logger.info("=== Runtime Overrides ===")
+                for asset, override in runtime_details.items():
+                    self.logger.info(f"Runtime Override for {asset}: {override}")
+            
+            # Configuration validation
+            issues = self.config_manager.validate_configuration()
+            if issues['errors']:
+                self.logger.error(f"Configuration Errors: {issues['errors']}")
+            if issues['warnings']:
+                self.logger.warning(f"Configuration Warnings: {issues['warnings']}")
+            if issues.get('info'):
+                self.logger.info(f"Configuration Info: {issues['info']}")
+            
+            self.logger.info("=== End Configuration Summary ===")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to log configuration summary: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+
+    def _validate_asset_configuration(self):
+        env_assets = set(self.assets)
+        configured_assets = set(self.config_manager.get_asset_names())
+        
+        # Add missing assets to configuration
+        missing_assets = env_assets - configured_assets
+        for asset in missing_assets:
+            self.logger.info(f"Adding missing asset {asset} to configuration")
+            # This will create default config and save to file
+            self.config_manager.get_base_asset_config(asset)
+        
+        # Log assets that are configured but not in environment
+        extra_assets = configured_assets - env_assets
+        if extra_assets:
+            self.logger.info(f"Assets in config but not in environment: {extra_assets}")
+
     async def start(self):
         """
         Start all its subcomponents.
         """
         self.logger.info("Starting MarketService...")
         self.running = True
+
+        self._validate_asset_configuration()
+        await asyncio.sleep(0.1)
+        self._log_configuration_summary()
 
         # Initialize components
         self.db_pool = await create_db_pool(DBConfig())
@@ -82,7 +187,9 @@ class MarketService:
                 calculator_id=i,
                 calc_queue=self.calc_queue,
                 db_pool=self.db_pool,
-                last_calculation=self.last_calculation
+                last_calculation=self.last_calculation,
+                indicator_registry=IndicatorRegistry(),
+                config_manager=self.config_manager
             )
             calc_task = asyncio.create_task(calculator.start())
             self.ta_processors.append({"task": calc_task, "service": calculator})
@@ -91,7 +198,8 @@ class MarketService:
         self.scheduler = CalcSchedulerService(
             assets=self.assets,
             calc_queue=self.calc_queue,
-            last_calculation=self.last_calculation
+            last_calculation=self.last_calculation,
+            config_manager=self.config_manager
         )
         asyncio.create_task(self.scheduler.start())
 
@@ -128,15 +236,27 @@ class MarketService:
 
     async def get_status(self):
         """Return the current status of the market service components."""
+        config_summary = self.config_manager.get_configuration_summary()
+        
         status = {
             "service": "running",
             "db_connection": "connected" if self.db_pool and self.db_pool.read_pool else "disconnected",
-            "assets": {}
+            "assets": {},
+            "configuration": {
+                "total_assets": config_summary['total_assets'],
+                "enabled_assets": config_summary['enabled_assets'],
+                "regime_adaptation": config_summary['regime_adaptation_global'],
+                "runtime_overrides": config_summary['runtime_overrides_count']
+            },
+            "asset_list": self.assets,
         }
 
         # Add status for each asset being monitored
         for asset in self.assets:
+            asset_config = self.config_manager.get_effective_asset_config(asset)
             asset_status = {
+                "enabled": asset_config.enabled,
+                "regime_adaptation": asset_config.regime_adaptation_enabled,
                 "websocket": "connected" if asset in self.websocket_listeners else "disconnected",
                 "last_update": self.last_update.get(asset, 0),
                 "last_calculation": self.last_calculation.get(asset, 0)

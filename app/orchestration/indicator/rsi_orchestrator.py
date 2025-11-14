@@ -3,13 +3,15 @@ import pandas as pd
 
 from app.models.indicator_context import IndicatorExecutionContext
 from app.orchestration.indicator.indicator_orchestrator import BaseIndicatorOrchestrator
+from config.asset_indicator_config import ConfigurationManager
 
 
 class OscillatorOrchestrator(BaseIndicatorOrchestrator):
 
-    def __init__(self, indicator_registry, min_data_points: int = 30):
+    def __init__(self, indicator_registry, min_data_points: int = 30, config_manager: ConfigurationManager = None):
         super().__init__(indicator_registry)
         self.min_data_points = min_data_points
+        self.config_manager = config_manager
 
     async def execute(self, context: IndicatorExecutionContext) -> Dict[str, Any]:
         if not self._validate_context(context):

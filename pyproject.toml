@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
     "flask (>=3.1.0,<4.0.0)",
-    "vectorbt[full] (>=0.27.2)",
+    "vectorbt (>=0.27.2)",
     "ta-lib (==0.4.32)", # use ta-lib ==0.4.32 for docker and local it should be ta-lib >=0.4.32
     "pandas (==1.5.3)",
     "httpx[http2]>=0.27.2,<0.28.0",
@@ -23,6 +23,8 @@ dependencies = [
     "asyncpg (>=0.30.0,<0.31.0)",
     "kaleido (==0.2.1)",
     "flask-socketio (>=5.3.2,<6.0.0)",
+    "PyYAML (>=6.0,<7.0)",
+    "aioredis (>=2.0.0,<3.0.0)",
 ]
 
 

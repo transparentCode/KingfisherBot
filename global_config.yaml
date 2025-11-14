@@ -1,0 +1,117 @@
+---
+regime_adaptation:
+  enabled: false
+  update_interval: '15m'
+  cache_duration: 900
+  confidence_threshold: 0.6
+
+signal_aggregation:
+  confluence_line_method: 'weighted'  # mean, weighted, median
+  slope_calculation_method: 'linear_regression'  # linear_regression, simple
+  smoothing_factor: 0.7  # 0.0 to 1.0
+  min_signal_quality: 2.0  # Minimum quality score for notifications
+  persistence_threshold: 3  # Minimum consecutive signals for high conviction
+  htf_weights:
+    '1d': 5
+    '4h': 4
+    '1h': 3
+    '30m': 2
+    '15m': 1
+    '5m': 1
+  conflict_penalties:
+    direction_conflict: -1
+    mtf_conflict: -2
+    line_conflict: -0.5
+
+default_timeframes: ['1m', '15m', '30m', '1h', '4h']
+
+calculation_settings:
+  parallel_processing: true
+  cache_results: true
+  max_workers: 4
+
+logging:
+  level: 'INFO'
+  log_regime_changes: true
+  log_config_updates: true
+
+telegram_notifications:
+  global_throttle:
+    max_per_minute: 10
+    max_per_hour: 50
+    emergency_cooldown: 300
+
+  default_asset_throttle:
+    cooldown_seconds: 300
+    max_per_hour: 6
+    priority_override: true
+    signal_type_specific:
+      breakout:
+        cooldown: 600
+        max_per_hour: 3
+      composite:
+        cooldown: 300
+        max_per_hour: 4
+      rsi:
+        cooldown: 900
+        max_per_hour: 2
+      ma_confluence:
+        cooldown: 450
+        max_per_hour: 3
+
+  asset_throttle_overrides:
+    BTCUSDT:
+      cooldown_seconds: 450  # 7.5 minutes for BTC
+      max_per_hour: 8
+    ETHUSDT:
+      cooldown_seconds: 450  # 7.5 minutes for ETH
+      max_per_hour: 5
+
+  time_awareness:
+    enabled: false  # Master switch - currently disabled
+    timezone: "Asia/Kolkata"
+    
+    features:
+      active_hours_check: true
+      quiet_hours_check: true
+      weekend_schedule: true
+      session_multipliers: true
+      holiday_check: true
+      emergency_override: true
+    
+    active_hours:
+      enabled: true
+      weekdays: 
+        start: "09:00"
+        end: "17:30"
+      weekends: 
+        start: "10:00"
+        end: "16:00"
+    
+    quiet_hours:
+      enabled: true
+      start: "22:00"
+      end: "08:00"
+      emergency_only: true  # ← Fixed: removed duplicate
+      block_all: false
+    
+    session_specific:
+      enabled: true  # ← Added: missing enabled flag
+      asia:
+        start: "09:00"
+        end: "17:00"
+        multiplier: 1.0
+      europe:
+        start: "13:30"
+        end: "22:00"
+        multiplier: 1.2
+      us:
+        start: "19:30"
+        end: "02:00"
+        multiplier: 1.5
+    
+    # Optional: Add market holidays section
+    market_holidays:
+      enabled: false
+      dates: []  # Add specific dates like ["2024-01-01", "2024-12-25"]
+      behavior: "quiet_hours"  # 'block_all', 'quiet_hours', 'normal'

@@ -1,23 +1,12 @@
-FROM python:3.10.17-slim
+FROM python:3.10.17-slim AS builder
 
-WORKDIR /app
+WORKDIR /build
 
-# Install build dependencies and clean up
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    make \
-    wget \
-    autoconf \
-    automake \
-    libtool \
-    libffi-dev \
-    python3-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    gcc g++ make wget autoconf automake libtool libffi-dev python3-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install TA-Lib dependencies with updated config scripts
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
@@ -29,20 +18,29 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     cd .. && \
     rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
+FROM python:3.10.17-slim
+
+WORKDIR /app
+
+COPY --from=builder /usr/lib/libta_lib.* /usr/lib/
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml poetry.lock* ./
 
-# Install Poetry and project dependencies
 RUN pip install --no-cache-dir poetry && \
     poetry config virtualenvs.create false && \
-    poetry install --no-root --no-interaction
+    poetry install --no-root --no-interaction --no-dev  # Add --no-dev for production
 
 COPY . .
 
+RUN useradd -m appuser
+USER appuser
+
 EXPOSE 8080
 
-# ENV FLASK_APP=run.py
+ENV PYTHONUNBUFFERED=1
 
-ENV FLASK_ENV=development
-
-# CMD ["flask", "run", "--host=0.0.0.0", "--port=8080"]
 CMD ["python", "run.py"]

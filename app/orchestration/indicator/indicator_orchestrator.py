@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from app.models.indicator_context import IndicatorExecutionContext
 from app.services.indicator_registers import IndicatorRegistry, IndicatorMetadata

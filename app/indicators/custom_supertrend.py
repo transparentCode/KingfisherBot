@@ -3,6 +3,7 @@ import numpy as np
 import plotly.graph_objects as go
 from numba import njit, float64, boolean
 from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
+from app.indicators.atr import AverageTrueRange
 from app.utils.price_utils import get_price_source_data
 
 
@@ -67,8 +68,12 @@ class StudentTSuperTrend(BaseIndicatorInterface):
         self.gamma = kwargs.get('gamma', 1.2)
         self.alpha_floor = kwargs.get('alpha_floor', kwargs.get('alphaFloor', 0.03))
         self.robust_atr = kwargs.get('robust_atr', kwargs.get('robustATR_on', True))
+        self.atr_smoothing = kwargs.get('atr_smoothing', 'ema')
         self.input_columns = ['high', 'low', 'close', 'open']
         self.category = 'Trend Indicators'
+        
+        # Initialize ATR indicator
+        self.atr_indicator = AverageTrueRange(period=self.atr_len, smoothing_type=self.atr_smoothing)
 
     def _calculate_adaptive_alpha(self, series, base_alpha):
         r = series.pct_change().fillna(0)
@@ -82,7 +87,7 @@ class StudentTSuperTrend(BaseIndicatorInterface):
 
     def calculate(self, data: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """
-        Calculates the Student-t SuperTrend values.
+        Calculates the Student-t SuperTrend values using ATR indicator.
 
         :param data: DataFrame with high, low, close columns.
         :return: DataFrame with t-EMA, SuperTrend, and direction columns.
@@ -93,27 +98,41 @@ class StudentTSuperTrend(BaseIndicatorInterface):
         atr_len = kwargs.get('atr_len', self.atr_len)
         atr_mult = kwargs.get('atr_mult', self.atr_mult)
         span = kwargs.get('span', self.span)
+        atr_smoothing = kwargs.get('atr_smoothing', self.atr_smoothing)
 
         # 1. t-EMA Calculation
         base_alpha_ema = 2.0 / (span + 1.0)
         alpha_p_ema = self._calculate_adaptive_alpha(df['close'], base_alpha_ema)
         df['t_ema'] = _calculate_t_ema(df['close'].to_numpy(), alpha_p_ema.to_numpy())
 
-        # 2. ATR Calculation
-        tr1 = df['high'] - df['low']
-        tr2 = abs(df['high'] - df['close'].shift(1))
-        tr3 = abs(df['low'] - df['close'].shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
+        # 2. ATR Calculation using ATR indicator
         if self.robust_atr:
+            # Use custom adaptive ATR calculation
+            tr1 = df['high'] - df['low']
+            tr2 = abs(df['high'] - df['close'].shift(1))
+            tr3 = abs(df['low'] - df['close'].shift(1))
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
             base_alpha_atr = 2.0 / (atr_len + 1.0)
             alpha_p_atr = self._calculate_adaptive_alpha(tr, base_alpha_atr)
-            atr = _calculate_t_ema(tr.to_numpy(), alpha_p_atr.to_numpy())
+            atr_values = _calculate_t_ema(tr.to_numpy(), alpha_p_atr.to_numpy())
+            
+            # Store in ATR column format for consistency
+            df[f'atr_{atr_len}_{atr_smoothing}'] = atr_values
+            df['atr'] = atr_values
         else:
-            atr = tr.ewm(span=atr_len, adjust=False).mean().to_numpy()
+            # Use standard ATR indicator
+            df = self.atr_indicator.calculate(
+                df, 
+                period=atr_len, 
+                smoothing_type=atr_smoothing
+            )
+            atr_column = f'atr_{atr_len}_{atr_smoothing}'
+            df['atr'] = df[atr_column]
 
+        # Ensure minimum ATR value
         price_eps = df['close'] * 0.0001
-        df['atr'] = np.maximum(atr, price_eps.to_numpy())
+        df['atr'] = np.maximum(df['atr'], price_eps)
 
         # 3. SuperTrend Core Calculation
         source = get_price_source_data(df, 'hlcc4')
@@ -126,12 +145,54 @@ class StudentTSuperTrend(BaseIndicatorInterface):
             lower_band.to_numpy()
         )
 
-        # Use consistent column naming for both legacy and new format
+        # Store results with consistent naming
         df['supertrend'] = st
         df['direction'] = direction
+        df['upper_band'] = upper_band
+        df['lower_band'] = lower_band
         df[f'supertrend_{atr_len}_{atr_mult}'] = st
         df[f'trend_{atr_len}_{atr_mult}'] = direction.astype(int) * 2 - 1  # Convert to 1/-1
 
+        return df
+
+    def calculate_with_atr_bands(self, data: pd.DataFrame, band_multiplier: float = 2.0, **kwargs) -> pd.DataFrame:
+        """
+        Calculate SuperTrend with additional ATR bands for analysis.
+        
+        :param data: Input DataFrame
+        :param band_multiplier: Multiplier for ATR bands
+        :return: DataFrame with SuperTrend and ATR bands
+        """
+        df = self.calculate(data, **kwargs)
+        
+        # Add ATR bands using the ATR indicator
+        df = self.atr_indicator.calculate_atr_bands(
+            df,
+            price_source='hlcc4',
+            multiplier=band_multiplier,
+            period=kwargs.get('atr_len', self.atr_len),
+            smoothing_type=kwargs.get('atr_smoothing', self.atr_smoothing)
+        )
+        
+        return df
+
+    def get_atr_percentile(self, data: pd.DataFrame, lookback_period: int = 252, **kwargs) -> pd.DataFrame:
+        """
+        Get ATR percentile for volatility regime analysis.
+        
+        :param data: Input DataFrame
+        :param lookback_period: Period for percentile calculation
+        :return: DataFrame with ATR percentile
+        """
+        df = self.calculate(data, **kwargs)
+        
+        df = self.atr_indicator.get_volatility_percentile(
+            df,
+            lookback_period=lookback_period,
+            period=kwargs.get('atr_len', self.atr_len),
+            smoothing_type=kwargs.get('atr_smoothing', self.atr_smoothing)
+        )
+        
         return df
 
     def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:

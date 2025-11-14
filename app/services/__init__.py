@@ -1,3 +1,3 @@
-from .indicator_registers import IndicatorRegisters
+from .indicator_registers import IndicatorRegistry
 
 all = ["IndicatorRegisters"]

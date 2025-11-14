@@ -1,0 +1,55 @@
+---
+assets:
+  - asset: "BTCUSDT"
+    enabled: true
+    regime_adaptation_enabled: true
+    ma_configs:
+      fast:
+        period: 14
+        source: "close"
+      medium:
+        period: 21
+        source: "close"
+      slow:
+        period: 50
+        source: "close"
+    supertrend_configs:
+      default:
+        atr_len: 10
+        atr_mult: 3.0
+        span: 14
+    oscillator_configs:
+      rsi:
+        period: 14
+        gaussian_weights: true
+    timeframe_overrides:
+      "15m": [14, 21, 50]
+      "30m": [8, 13, 21]
+      "1h": [8, 13, 21]
+
+  - asset: "ETHUSDT"
+    enabled: true
+    regime_adaptation_enabled: false
+    ma_configs:
+      fast:
+        period: 14
+        source: "close"
+      medium:
+        period: 21
+        source: "close"
+      slow:
+        period: 50
+        source: "close"
+    supertrend_configs:
+      default:
+        atr_len: 10
+        atr_mult: 3.0
+        span: 14
+    oscillator_configs:
+      rsi:
+        period: 14
+        gaussian_weights: true
+    timeframe_overrides:
+      "15m": [14, 21, 50]
+      "30m": [8, 13, 21]
+      "1h": [8, 13, 21]

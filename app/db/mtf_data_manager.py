@@ -78,8 +78,8 @@ class MTFDataManager:
             rows = await self.db_handler.read_candles(
                 symbol=asset,
                 interval=db_interval,
-                start_time=start_time.isoformat(),
-                end_time=end_time.isoformat(),
+                start_time=start_time,
+                end_time=end_time,
                 limit=5000  # Adjust based on your needs
             )
 

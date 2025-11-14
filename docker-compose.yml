@@ -1,5 +1,9 @@
 version: '3.8'
 
+networks:
+  kingfisher-network:
+    driver: bridge
+
 services:
   kingfisherbot:
     build: .
@@ -12,31 +16,61 @@ services:
       - FLASK_ENV=development
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgres://postgres:postgres@timescaledb:5432/kingfisherdb
+      - REDIS_URL=redis://redis:6379/0
     volumes:
-      # For development, mount the local code to the container
       - .:/app
-      # Exclude directories that should not be mounted
       - /app/venv
       - /app/.git
       - /app/__pycache__
     restart: unless-stopped
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - kingfisher-network
 
   timescaledb:
     image: timescale/timescaledb:latest-pg15
     container_name: timescaledb
     restart: unless-stopped
     environment:
-      - POSTGRES_PASSWORD=admin
-      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
       - POSTGRES_DB=kingfisherdb
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
-    command: postgres -c shared_preload_libraries=timescaledb
+    command: postgres -c shared_preload_libraries=timescaledb -c timescaledb.telemetry=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kingfisherdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kingfisher-network
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: kingfisher_redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    networks:
+      - kingfisher-network
 
 volumes:
   timescale_data:
+    driver: local
+  redis_data:
     driver: local

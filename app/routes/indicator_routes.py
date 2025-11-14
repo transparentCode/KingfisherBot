@@ -9,21 +9,21 @@ import logging
 import asyncio
 
 from app.exchange import BinanceConnector
-from app.services.indicator_registers import IndicatorRegisters
-from app.database.db_handler import DBHandler
+from app.services.indicator_registers import IndicatorRegistry
+from app.db.db_handler import DBHandler
 
 indicator_bp = Blueprint('indicator', __name__)
 
 logger = logging.getLogger(__name__)
 
-indicator_register = IndicatorRegisters()
+indicator_register = IndicatorRegistry()
 
 @indicator_bp.route('/api/indicators/available', methods=['GET'])
 def get_available_indicators_for_ui():
     """Get all indicators formatted for UI with parameter schemas"""
     try:
-        IndicatorRegisters.register_indicators()  # Ensure indicators are registered
-        registry = IndicatorRegisters()
+        IndicatorRegistry.register_indicator()  # Ensure indicators are registered
+        registry = IndicatorRegistry()
         categories = registry.get_all_indicators_for_ui()
 
         return jsonify({
@@ -40,7 +40,7 @@ def get_available_indicators_for_ui():
 def get_indicator_schema_for_ui(indicator_id):
     """Get detailed schema for specific indicator"""
     try:
-        registry = IndicatorRegisters()
+        registry = IndicatorRegistry()
         indicator_info = registry.get_indicator_for_ui(indicator_id)
 
         if not indicator_info:
@@ -70,8 +70,8 @@ def calculate_indicator(indicator_id):
         limit = int(request.args.get('limit', 500))  # Use limit instead of lookback_days
 
         # Get indicator registry
-        IndicatorRegisters.register_indicators()
-        registry = IndicatorRegisters()
+        IndicatorRegistry.register_indicator()
+        registry = IndicatorRegistry()
 
         # Check if indicator exists
         indicator_info = registry.get_indicator_for_ui(indicator_id)

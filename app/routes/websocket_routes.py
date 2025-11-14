@@ -2,7 +2,7 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask import request
 import asyncio
 import logging
-from app.database.db_handler import DBHandler
+from app.db.db_handler import DBHandler
 from datetime import datetime
 
 logger = logging.getLogger(__name__)

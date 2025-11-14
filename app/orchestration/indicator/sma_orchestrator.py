@@ -4,32 +4,44 @@ import pandas as pd
 
 from app.models.indicator_context import IndicatorExecutionContext
 from app.orchestration.indicator.indicator_orchestrator import BaseIndicatorOrchestrator
+from config.asset_indicator_config import ConfigurationManager
 
 
 class MovingAverageOrchestrator(BaseIndicatorOrchestrator):
 
-    def __init__(self, indicator_registry, min_data_points: int = 20):
+    def __init__(self, indicator_registry, min_data_points: int = 20, config_manager: ConfigurationManager = None):
         super().__init__(indicator_registry)
         self.min_data_points = min_data_points
+        self.config_manager = config_manager
 
-    def _get_indicator_configs(self, indicator_id: str, param_schema: dict) -> Dict[str, Dict]:
-        """Define different parameter configurations for indicators"""
-        # Extract parameter constraints from schema
+    def _get_indicator_configs(self, context: IndicatorExecutionContext, indicator_id: str, param_schema: dict) -> Dict[str, Dict]:
+        """Get indicator configs from asset configuration if available, otherwise use defaults"""
+
+        if self.config_manager:
+            try:
+                asset_config = self.config_manager.get_effective_asset_config(context.asset)
+                if asset_config and hasattr(asset_config, 'ma_configs') and asset_config.ma_configs:
+                    self.logger.debug(f"Using asset config MA parameters for {context.asset}")
+                    return asset_config.ma_configs
+            except Exception as e:
+                self.logger.warning(f"Failed to get asset config for {context.asset}: {e}")
+
+        # Fallback: Use default logic based on parameter schema
+        self.logger.debug(f"Using default MA parameters for {context.asset}")
         params = param_schema.get('parameters', {})
         period_config = params.get('period', {})
 
         if indicator_id in ['SMA', 'EMA']:
-            # Use schema constraints if available
             min_period = period_config.get('min', 5)
             max_period = period_config.get('max', 100)
 
             return {
-                'fast': {'period': max(min_period, 14)},
-                'medium': {'period': max(min_period, 21)},
-                'slow': {'period': min(max_period, 50)}
+                'fast': {'period': max(min_period, 14), 'source': 'close'},
+                'medium': {'period': max(min_period, 21), 'source': 'close'},
+                'slow': {'period': min(max_period, 50), 'source': 'close'}
             }
 
-        return {'default': {}}
+        return {'default': {'period': 20, 'source': 'close'}}
 
     def _get_latest_ma_value(self, df: pd.DataFrame, params: Dict[str, Any] = None) -> Optional[float]:
         """Get latest moving average value using dynamic column names"""
@@ -69,25 +81,18 @@ class MovingAverageOrchestrator(BaseIndicatorOrchestrator):
         results = {}
         ma_indicators = self._get_indicators_by_category("Moving Averages")
 
-        for indicator_id, indicator_metadata in ma_indicators.items():
-            try:
-                indicator_class = indicator_metadata.class_ref
+        
+        for timeframe, df in context.data_cache.items():
+            if df.empty or len(df) < self.min_data_points:
+                continue
 
-                # Use metadata parameter schema instead of creating temp instance
-                param_schema = indicator_metadata.parameter_schema
-                configs = self._get_indicator_configs(indicator_id, param_schema)
+            for indicator_id, indicator_metadata in ma_indicators.items():
+                try:
+                    param_schema = indicator_metadata.parameter_schema
+                    configs = self._get_indicator_configs(context=context, indicator_id=indicator_id, param_schema=param_schema)
 
-                for config_name, params in configs.items():
-                    required_timeframes = getattr(indicator_class, 'required_timeframes', [context.primary_timeframe])
-
-                    for timeframe in required_timeframes:
-                        if timeframe not in context.data_cache:
-                            continue
-
-                        df = context.data_cache[timeframe]
-                        if df.empty or len(df) < self.min_data_points:
-                            continue
-
+                    for config_name, params in configs.items():
+                        
                         indicator_instance = self._create_indicator_instance(indicator_id, **params)
                         if not indicator_instance:
                             continue
@@ -105,12 +110,15 @@ class MovingAverageOrchestrator(BaseIndicatorOrchestrator):
                                     'timeframe': timeframe,
                                     'category': 'Moving Averages',
                                     'latest_value': self._get_latest_ma_value(result_df, params),
-                                    'calculation_time': pd.Timestamp.now()
+                                    'calculation_time': pd.Timestamp.now(),
+                                    'asset': context.asset
                                 }
                             }
+                            
+                            self.logger.debug(f"Calculated {indicator_id}_{config_name} for {context.asset} on {timeframe}")
 
-            except Exception as e:
-                self.logger.error(f"Error calculating MA {indicator_id}: {e}")
-                continue
+                except Exception as e:
+                    self.logger.error(f"Error calculating MA {indicator_id} for {timeframe}: {e}")
+                    continue
 
         return results

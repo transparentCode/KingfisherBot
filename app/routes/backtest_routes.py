@@ -4,7 +4,6 @@ from flask import Blueprint, jsonify, request, render_template
 import plotly
 import json
 
-from app.factory.startegy_factory import StrategyFactory
 from app.backtest.backtest_engine import VectorBTBacktest
 from app.exchange.BinanceConnector import BinanceConnector
 
@@ -28,7 +27,7 @@ def run_backtest():
     df = connector.get_historical_data(symbol, interval, lookback_days)
 
     # Create and execute strategy
-    factory = StrategyFactory()
+    factory = None
     strategy = factory.create_strategy(strategy_id, **strategy_params)
     strategy_results = strategy.execute(df)
 
@@ -61,7 +60,7 @@ def get_backtest_plot():
         df = connector.get_historical_data(symbol, interval, lookback_days)
 
         # Create and execute strategy
-        factory = StrategyFactory()
+        factory = None
         strategy = factory.create_strategy(strategy_id)
         strategy_results = strategy.execute(df)
 
