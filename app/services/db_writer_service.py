@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -26,7 +27,7 @@ class DBWriter:
         self.running = True
         batch = []
         batch_size = 50
-        last_flush_time = asyncio.get_event_loop().time()
+        last_flush_time = time.time()
         flush_interval = 5.0  # seconds
 
 
@@ -40,10 +41,10 @@ class DBWriter:
                     if len(batch) >= batch_size:
                         await self._flush_batch(batch, self.worker_id)
                         batch = []
-                        last_flush_time = asyncio.get_event_loop().time()
+                        last_flush_time = time.time()
 
                 except asyncio.TimeoutError:
-                    current_time = asyncio.get_event_loop().time()
+                    current_time = time.time()
                     if batch and (current_time - last_flush_time >= flush_interval):
                         await self._flush_batch(batch, self.worker_id)
                         batch = []
@@ -70,7 +71,15 @@ class DBWriter:
                 try:
                     count = await self.db_pool.write_candles(symbol, '1', candles)
                     self.logger.debug(f"Worker {worker_id} wrote {count} candles for {symbol}")
-                    await self.indicator_calc_queue.put(symbol)
+                    
+                    # Updated: Push dictionary task instead of raw string
+                    task = {
+                        "type": "INDICATOR_UPDATE",
+                        "asset": symbol,
+                        "timestamp": time.time()
+                    }
+                    await self.indicator_calc_queue.put(task)
+                    
                 except Exception as e:
                     self.logger.error(f"Worker {worker_id} failed to write candles for {symbol}: {str(e)}")
 

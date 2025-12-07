@@ -171,6 +171,7 @@ class MarketService:
         self._log_configuration_summary()
 
         # Initialize components
+        await self.redis_handler.initialize()
         self.db_pool = await create_db_pool(DBConfig())
         self.monitor = MonitoringSystem(self)
         await self.monitor.start()  # Start the monitoring system
@@ -403,6 +404,9 @@ class MarketService:
         # Close DB pool
         if self.db_pool:
             await self.db_pool.close()
+
+        if self.redis_handler:
+            await self.redis_handler.close()
 
         self.logger.info("MarketService stopped")
 

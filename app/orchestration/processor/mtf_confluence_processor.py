@@ -1,24 +1,28 @@
-from app.orchestration.processor.telegram_notification_processor import TelegramNotificationProcessor
-from app.telegram.telegram_client import TelegramClient
 import logging
+import traceback
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from scipy.special import softmax
-from config.asset_indicator_config import ConfigurationManager  # Assuming this is your config class
+
+from app.orchestration.processor.telegram_notification_processor import TelegramNotificationProcessor
+from app.telegram.telegram_client import TelegramClient
+from app.db.redis_handler import RedisHandler
+from app.utils.price_utils import PriceUtils
+from config.asset_indicator_config import ConfigurationManager
 
 class SignalAggregationProcessor:
     def __init__(self, config_manager: ConfigurationManager = None):
         self.logger = logging.getLogger("app")
         self.aggregated_signals = {}
         self.config_manager = config_manager
+        self.redis_handler = RedisHandler()
         
         # Configuration settings with defaults
         self.confluence_line_method = self._get_config_value('confluence_line_method', 'mean')
         self.slope_calculation_method = self._get_config_value('slope_calculation_method', 'linear_regression')
         self.htf_priority_weights = self._get_htf_weights()
-        self.smoothing_factor = self._get_config_value('smoothing_factor', 0.7)  # For temporal smoothing
+        self.smoothing_factor = self._get_config_value('smoothing_factor', 0.7)
         
         # Track previous conviction for smoothing
         self.previous_conviction = {}
@@ -29,17 +33,15 @@ class SignalAggregationProcessor:
     def _initialize_telegram_processor(self):
         """Initialize Telegram processor if enabled"""
         try:
-            # Get telegram configuration
             telegram_config = self._get_telegram_config()
             
             if not telegram_config.get('enabled', False):
                 self.logger.info("Telegram notifications disabled in configuration")
                 return
 
-            # Try to create Telegram client
             telegram_client = TelegramClient()
             
-            if telegram_client and hasattr(telegram_client, 'send_message'):
+            if telegram_client: # Simplified check
                 self.telegram_processor = TelegramNotificationProcessor(
                     config=telegram_config,
                     telegram_client=telegram_client,
@@ -57,16 +59,15 @@ class SignalAggregationProcessor:
         """Get Telegram configuration from config manager"""
         if self.config_manager and hasattr(self.config_manager, 'global_config'):
             telegram_config = self.config_manager.global_config.get('telegram_notifications', {})
-            
-            # Add required fields for compatibility
-            telegram_config.update({
-                'timeframes_to_monitor': ['15m', '30m', '1h', '4h'],
-                'save_charts': True,
-                'charts_dir': './charts'
-            })
-            return telegram_config
+            # Ensure defaults exist
+            return {
+                'enabled': telegram_config.get('enabled', False),
+                'timeframes_to_monitor': telegram_config.get('timeframes_to_monitor', ['15m', '30m', '1h', '4h']),
+                'save_charts': telegram_config.get('save_charts', True),
+                'charts_dir': telegram_config.get('charts_dir', './charts'),
+                **telegram_config # Override with any other keys
+            }
         
-        # Fallback configuration
         return {
             'enabled': False,
             'timeframes_to_monitor': ['15m', '30m'],
@@ -76,10 +77,14 @@ class SignalAggregationProcessor:
 
     async def initialize(self):
         """Initialize Redis and Telegram processor"""
-        await self.redis_handler.initialize()
+        # RedisHandler is usually lazy-loaded or pre-initialized, but if it has an async init:
+        if hasattr(self.redis_handler, 'initialize'):
+             await self.redis_handler.initialize()
         
         if self.telegram_processor:
-            await self.telegram_processor.initialize()
+            # Assuming TelegramProcessor has an async initialize method
+            if hasattr(self.telegram_processor, 'initialize'):
+                await self.telegram_processor.initialize()
             self.logger.info("SignalAggregationProcessor initialized with Redis and Telegram")
         else:
             self.logger.info("SignalAggregationProcessor initialized with Redis only")
@@ -100,30 +105,17 @@ class SignalAggregationProcessor:
     
     async def process_results(self, asset: str, all_results: Dict[str, Any]):
         try:
-            self.logger.info(f"Starting enhanced MTF signal aggregation for {asset}")
+            self.logger.info(f"Starting MTF signal aggregation for {asset}")
             
-            # Validate input
             if not all_results:
                 self.logger.warning("No results provided for aggregation")
                 self.aggregated_signals[asset] = []
                 return
             
-            # Log MTF data summary
-            timeframe_summary = {}
-            for result_key in all_results.keys():
-                parts = result_key.split('_')
-                if parts:
-                    timeframe = parts[-1]
-                    timeframe_summary[timeframe] = timeframe_summary.get(timeframe, 0) + 1
-            
-            # chnage logging to debug
-            self.logger.info(f"MTF Results Summary - {asset}: {timeframe_summary}")
-            self.logger.info(f"Total result keys: {list(all_results.keys())}")
-            
             # Analyze MTF EMA direction agreement
             mtf_analysis = self._analyze_ema_direction_agreement(all_results)
             
-            # Collect all signal types with enhanced confluence
+            # Collect all signal types
             signals = {
                 'trendline_signals': self._extract_trendline_signals(all_results),
                 'ma_signals': self._extract_ma_signals(all_results),
@@ -131,26 +123,127 @@ class SignalAggregationProcessor:
                 'price_action': self._analyze_price_action(all_results),
                 'mtf_analysis': mtf_analysis
             }
-            self.logger.info(f"MTF Direction Analysis: {mtf_analysis}")
             
-            # Create composite signals with MTF enhancements
+            # Create composite signals
             composite_signals = self._create_enhanced_composite_signals(asset, signals)
             
-            # Store for notification processor
+            # Store locally
             self.aggregated_signals[asset] = composite_signals
             
+            # --- CRITICAL FIX: Trigger Telegram Notification ---
+            if composite_signals and self.telegram_processor:
+                self.logger.info(f"Sending {len(composite_signals)} signals to Telegram processor")
+                # Assuming process_signals is async
+                await self.telegram_processor.process_signals(asset, composite_signals, all_results)
+            # ---------------------------------------------------
+
             if composite_signals:
-                self.logger.info(f"Enhanced composite signals for {asset}: {len(composite_signals)} signals detected")
                 for signal in composite_signals:
                     self.logger.info(f"Signal: {signal['direction']} on {signal['timeframe']} "
                                      f"(score: {signal['composite_score']}, conviction: {signal.get('conviction_level', 'normal')})")
             
         except Exception as e:
             self.logger.error(f"Error in enhanced signal aggregation for {asset}: {e}")
-            import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             self.aggregated_signals[asset] = []
-    
+
+    def _check_enhanced_ma_confluence(self, tf_results: Dict, current_price: float) -> Dict:
+        """Enhanced MA confluence check with explicit confluence line"""
+        ma_values = {}
+        for result_key, result_data in tf_results.items():
+            try:
+                metadata = result_data.get('metadata', {})
+                if not isinstance(metadata, dict): continue
+                
+                # Check category or type
+                if metadata.get('category') != 'Moving Averages' and metadata.get('type') != 'MA':
+                    continue
+                
+                indicator_id = metadata.get('indicator_id')
+                latest_value = metadata.get('latest') # Updated to match TA Orchestrator
+                
+                # Fallback to old key
+                if latest_value is None:
+                    latest_value = metadata.get('latest_value')
+
+                if latest_value is not None:
+                    ma_values[indicator_id] = float(latest_value)
+            except Exception:
+                continue
+        
+        if not ma_values:
+            return {'signal': False, 'confluence_line': None}
+        
+        confluence_line_data = PriceUtils.calculate_confluence_line(ma_values, method=self.confluence_line_method)
+        traditional_confluence = self._evaluate_confluence_conditions(current_price, ma_values)
+        
+        enhanced_result = traditional_confluence.copy()
+        enhanced_result['confluence_line'] = confluence_line_data
+        
+        if confluence_line_data['line']:
+            line_value = confluence_line_data['line']
+            distance_pct = ((current_price - line_value) / line_value) * 100 if line_value != 0 else 0
+            
+            enhanced_result['line_analysis'] = {
+                'distance_pct': round(distance_pct, 2),
+                'position': 'above' if distance_pct > 0 else 'below',
+                'significant': abs(distance_pct) > 0.5
+            }
+        
+        return enhanced_result
+
+    # ... (Keep _create_enhanced_composite_signals, _evaluate_enhanced_timeframe_confluence, _extract_trendline_signals as is) ...
+
+    def _extract_ma_signals(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract MA signals and price vs MA analysis"""
+        ma_signals = {'above_ma': [], 'below_ma': [], 'current_price': None}
+        current_price = None
+        
+        # First pass: Find current price
+        for result_data in results.values():
+            metadata = result_data.get('metadata', {})
+            # Try to get price from metadata first (if we add it there later)
+            # Otherwise get from dataframe
+            if 'data' in result_data:
+                df = result_data['data']
+                if not df.empty and 'close' in df.columns:
+                    current_price = float(df['close'].iloc[-1])
+                    ma_signals['current_price'] = current_price
+                    break
+        
+        if not current_price:
+            return ma_signals
+
+        for result_key, result_data in results.items():
+            try:
+                metadata = result_data.get('metadata', {})
+                if not isinstance(metadata, dict): continue
+                
+                # Support both old 'category' and new 'type' keys
+                is_ma = metadata.get('category') == 'Moving Averages' or metadata.get('type') == 'MA'
+                
+                if is_ma:
+                    indicator_id = metadata.get('indicator_id')
+                    # Support both keys
+                    ma_value = metadata.get('latest') or metadata.get('latest_value')
+                    timeframe = metadata.get('timeframe', 'unknown')
+                    
+                    if ma_value is not None:
+                        signal_data = {
+                            'timeframe': timeframe,
+                            'indicator': indicator_id,
+                            'ma_value': float(ma_value),
+                            'price': current_price
+                        }
+                        if current_price > float(ma_value):
+                            ma_signals['above_ma'].append(signal_data)
+                        else:
+                            ma_signals['below_ma'].append(signal_data)
+            except Exception:
+                continue
+        
+        return ma_signals
+
     def _analyze_ema_direction_agreement(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze EMA direction agreement across timeframes"""
         timeframe_directions = {}
@@ -185,7 +278,7 @@ class SignalAggregationProcessor:
                 if len(df) >= 5:  # Need enough points for regression
                     ema_cols = [col for col in df.columns if 'ema' in col.lower()]
                     for ema_col in ema_cols:
-                        slope = self._calculate_slope(df[ema_col])
+                        slope = PriceUtils.calculate_slope(df[ema_col], method=self.slope_calculation_method)
                         if slope is not None:
                             ema_slopes.append(slope)
         
@@ -214,32 +307,6 @@ class SignalAggregationProcessor:
             }
         
         return {'direction': 'neutral', 'strength': 0, 'slope_count': 0, 'timeframe_weight': 1}
-    
-    def _calculate_slope(self, series: pd.Series) -> Optional[float]:
-        """Calculate slope using configurable method with error handling"""
-        try:
-            series_clean = series.dropna()
-            if len(series_clean) < 3:
-                return 0.0  # Neutral slope
-            
-            if self.slope_calculation_method == 'linear_regression':
-                X = np.arange(len(series_clean)).reshape(-1, 1)
-                y = series_clean.values
-                reg = LinearRegression()
-                reg.fit(X, y)
-                return float(reg.coef_[0])
-                
-            elif self.slope_calculation_method == 'simple':
-                recent_values = series_clean.tail(3).values
-                return float((recent_values[-1] - recent_values[0]) / 2)
-                
-            else:
-                recent_values = series_clean.tail(3).values
-                return float((recent_values[-1] - recent_values[0]) / 2)
-                
-        except Exception as e:
-            self.logger.error(f"Error calculating slope: {e}")
-            return 0.0  # Neutral fallback
     
     def _evaluate_direction_agreement(self, timeframe_directions: Dict) -> Dict:
         """Evaluate how well timeframes agree on direction with improved scoring"""
@@ -290,128 +357,6 @@ class SignalAggregationProcessor:
         self.previous_conviction['multiplier'] = smoothed
         
         return smoothed
-    
-    def _calculate_confluence_line(self, ma_values: Dict[str, float]) -> Dict:
-        """Calculate explicit confluence line from EMA values with validation"""
-        # Validate and parse EMA values
-        ema_data = {}
-        for indicator_id, value in ma_values.items():
-            if 'ema' in indicator_id.lower() and pd.notna(value) and value > 0:
-                period = self._extract_ema_period(indicator_id)
-                if period:
-                    ema_data[period] = float(value)
-        
-        if len(ema_data) < 2:
-            return {'line': None, 'method': self.confluence_line_method, 'ema_count': len(ema_data)}
-        
-        values = np.array(list(ema_data.values()))
-        
-        if self.confluence_line_method == 'weighted':
-            weights = np.array(list(ema_data.keys()))
-            total_weight = np.sum(weights)
-            confluence_line = np.sum(weights * values) / total_weight if total_weight > 0 else np.mean(values)
-            
-        elif self.confluence_line_method == 'median':
-            confluence_line = np.median(values)
-            
-        else:  # 'mean' (default)
-            confluence_line = np.mean(values)
-        
-        return {
-            'line': confluence_line,
-            'method': self.confluence_line_method,
-            'ema_count': len(ema_data),
-            'ema_data': ema_data,
-            'ema_periods': list(ema_data.keys())
-        }
-    
-    def _extract_ema_period(self, indicator_id: str) -> Optional[int]:
-        """Extract EMA period from indicator ID or config with fallback"""
-        try:
-            if 'fast' in indicator_id.lower():
-                return 14
-            elif 'medium' in indicator_id.lower():
-                return 21
-            elif 'slow' in indicator_id.lower():
-                return 50
-            else:
-                import re
-                numbers = re.findall(r'\d+', indicator_id)
-                if numbers:
-                    return int(numbers[0])
-            return None
-        except:
-            return None
-    
-    def _analyze_enhanced_ma_confluence(self, results: Dict[str, Any]) -> Dict[str, Any]:
-        """Enhanced MA confluence analysis with explicit confluence line"""
-        confluence_by_tf = {}
-        timeframe_data = self._group_results_by_timeframe(results)
-        
-        for timeframe, tf_results in timeframe_data.items():
-            current_price = self._get_current_price(tf_results)
-            if not current_price:
-                continue
-            
-            enhanced_confluence = self._check_enhanced_ma_confluence(tf_results, current_price)
-            if enhanced_confluence['signal'] or enhanced_confluence.get('confluence_line'):
-                confluence_by_tf[timeframe] = enhanced_confluence
-        
-        return confluence_by_tf
-    
-    def _check_enhanced_ma_confluence(self, tf_results: Dict, current_price: float) -> Dict:
-        """Enhanced MA confluence check with explicit confluence line"""
-        ma_values = {}
-        for result_key, result_data in tf_results.items():
-            try:
-                metadata = result_data.get('metadata', {})
-                if not isinstance(metadata, dict):
-                    continue
-                
-                category = metadata.get('category')
-                if category != 'Moving Averages':
-                    continue
-                
-                indicator_id = metadata.get('indicator_id')
-                latest_value = metadata.get('latest_value')
-                
-                if latest_value is None and 'data' in result_data:
-                    df = result_data['data']
-                    latest_value = self._get_latest_ma_value_from_df(df)
-                
-                if latest_value is not None:
-                    ma_values[indicator_id] = float(latest_value)
-            except Exception as e:
-                self.logger.error(f"Error processing enhanced MA confluence for {result_key}: {e}")
-                continue
-        
-        if not ma_values:
-            return {'signal': False, 'confluence_line': None}
-        
-        # Calculate confluence line
-        confluence_line_data = self._calculate_confluence_line(ma_values)
-        
-        # Evaluate traditional confluence
-        traditional_confluence = self._evaluate_confluence_conditions(current_price, ma_values)
-        
-        # Enhanced result
-        enhanced_result = traditional_confluence.copy()
-        enhanced_result['confluence_line'] = confluence_line_data
-        
-        # Add confluence line analysis if line exists
-        if confluence_line_data['line']:
-            line_value = confluence_line_data['line']
-            distance_pct = ((current_price - line_value) / line_value) * 100 if line_value != 0 else 0
-            
-            enhanced_result['line_analysis'] = {
-                'distance_pct': round(distance_pct, 2),
-                'position': 'above' if distance_pct > 0 else 'below',
-                'significant': abs(distance_pct) > 0.5
-            }
-            
-            self.logger.debug(f"Confluence line: {line_value:.2f}, Price: {current_price:.2f}, Distance: {distance_pct:.2f}%")
-        
-        return enhanced_result
     
     def _create_enhanced_composite_signals(self, asset: str, signals: Dict) -> List[Dict]:
         """Create enhanced composite signals with MTF analysis"""
@@ -617,73 +562,6 @@ class SignalAggregationProcessor:
                         'strength': 1.0
                     })
         return trendline_signals
-    
-    def _extract_ma_signals(self, results: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract MA signals and price vs MA analysis with enhanced logging"""
-        ma_signals = {'above_ma': [], 'below_ma': [], 'current_price': None}
-        current_price = None
-        processed_count = 0
-        
-        for result_key, result_data in results.items():
-            try:
-                metadata = result_data.get('metadata', {})
-                if not isinstance(metadata, dict):
-                    continue
-                
-                # Get current price
-                if not current_price and 'data' in result_data:
-                    df = result_data['data']
-                    if not df.empty and 'close' in df.columns:
-                        current_price = float(df['close'].iloc[-1])
-                        ma_signals['current_price'] = current_price
-                        self.logger.debug(f"Current price detected: {current_price}")
-                
-                category = metadata.get('category')
-                timeframe = metadata.get('timeframe', 'unknown')
-                indicator_id = metadata.get('indicator_id')
-                latest_value = metadata.get('latest_value')
-                
-                if category == 'Moving Averages' and current_price:
-                    ma_value = latest_value
-                    if ma_value is None and 'data' in result_data:
-                        df = result_data['data']
-                        ma_value = self._get_latest_ma_value_from_df(df)
-                    
-                    if ma_value is not None:
-                        signal_data = {
-                            'timeframe': timeframe,
-                            'indicator': indicator_id,
-                            'ma_value': float(ma_value),
-                            'price': current_price
-                        }
-                        if current_price > float(ma_value):
-                            ma_signals['above_ma'].append(signal_data)
-                        else:
-                            ma_signals['below_ma'].append(signal_data)
-                        
-                        processed_count += 1
-                        self.logger.debug(f"Processed MA signal: {indicator_id} on {timeframe} = {ma_value}")
-            except Exception as e:
-                self.logger.error(f"Error processing MA signals for {result_key}: {e}")
-                continue
-        
-        self.logger.info(f"Processed {processed_count} MA signals. Above MA: {len(ma_signals['above_ma'])}, Below MA: {len(ma_signals['below_ma'])}")
-        return ma_signals
-    
-    def _get_latest_ma_value_from_df(self, df: pd.DataFrame) -> Optional[float]:
-        """Extract latest MA value from dataframe when not in metadata"""
-        try:
-            if df.empty:
-                return None
-            ma_columns = [col for col in df.columns if col not in ['open', 'high', 'low', 'close', 'volume'] and 'ema' in col.lower()]
-            if ma_columns:
-                latest_value = df[ma_columns[0]].iloc[-1]
-                if pd.notna(latest_value):
-                    return float(latest_value)
-            return None
-        except Exception as e:
-            self.logger.error(f"Error extracting MA value from dataframe: {e}")
-            return None
     
     def _group_results_by_timeframe(self, results: Dict[str, Any]) -> Dict[str, Dict]:
         """Group results by timeframe with validation"""

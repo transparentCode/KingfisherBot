@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -18,32 +17,28 @@ class WebSocketListenerConfig:
 class WebSocketListenerService:
     def __init__(self, asset: str, write_queue: asyncio.Queue, monitor: MonitoringSystem,
                  config: Optional[WebSocketListenerConfig] = None):
-        """
-        Initialize a websocket listener.
-
-        Args:
-            asset: Asset symbol to listen for
-            write_queue: Queue to send received data to
-            monitor: Monitoring system for reporting metrics
-        """
         self.asset = asset
         self.write_queue = write_queue
         self.monitor = monitor
-        self.websocket = None
+        self.config = WebSocketListenerConfig() if config is None else config
+        self.logger = logging.getLogger(self.config.logger_name)
+        
+        # State
         self.connected = False
         self.should_run = False
         self.last_message_time = 0
-        self.reconnect_delay = 1  # Start with 1-second delay
-        self.max_reconnect_delay = 60  # Maximum delay of 60 seconds
-        self.config = WebSocketListenerConfig() if config is None else config
-        self.logger = logging.getLogger(self.config.logger_name)
+        self.reconnect_delay = 1
+        self.max_reconnect_delay = 60
+        
+        # Connector components
         self.connector = BinanceConnector()
         self.ws_client = None
         self.ws_thread = None
-        self.loop = asyncio.get_running_loop()
+        self.loop = None
 
     async def start(self):
         """Start the websocket listener."""
+        self.loop = asyncio.get_running_loop()
         self.logger.info(f"Starting websocket listener for {self.asset}")
         self.should_run = True
 
@@ -52,54 +47,34 @@ class WebSocketListenerService:
                 await self._connect_and_listen()
             except Exception as e:
                 self.logger.error(f"Error in websocket listener for {self.asset}: {e}")
-
-                # Implement exponential backoff for reconnection
+                # Exponential backoff
                 await asyncio.sleep(self.reconnect_delay)
                 self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
             else:
-                # If we got here without exception, reset the reconnected delay
                 self.reconnect_delay = 1
 
     async def _connect_and_listen(self):
         """Connect to websocket and listen for messages."""
         self.logger.info(f"Connecting to websocket for {self.asset}")
 
-        # Reset any existing connections
-        if self.ws_client:
-            try:
-                self.connector.stop_websocket_stream(self.ws_client)
-            except:
-                self.logger.warning(f"Error stopping existing websocket for {self.asset}")
-            self.ws_client = None
-            self.ws_thread = None
+        # Cleanup previous connection
+        self._cleanup_connection()
 
-        # Create a callback that puts messages on the asyncio queue
+        # --- THREAD BRIDGE ---
         def message_callback(data):
             """
-            Process incoming WebSocket message and put it on the asyncio queue.
+            Strictly a bridge. No logic here.
+            Passes data from Thread -> Async Loop safely.
             """
-            try:
-                # No need to parse data again, it's already a Python dict
-                # Update last message time immediately
-                self.last_message_time = time.time()
-                self.monitor.report_message_received(self.asset)
+            if self.should_run and self.loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_incoming_message(data),
+                    self.loop
+                )
+        # ---------------------
 
-                # If it's a kline message, process it
-                if 'k' in data:
-                    # Use run_coroutine_threadsafe to safely call async code from a different thread
-                    asyncio.run_coroutine_threadsafe(
-                        self._handle_incoming_message(data),
-                        self.loop
-                    )
-                    self.logger.info(f"Message received for {self.asset}: {data}")
-                else:
-                    self.logger.debug(f"Received non-kline message for {self.asset}: {data}")
-            except Exception as e:
-                import traceback
-                self.logger.error(f"Error processing message: {str(e)}\n{traceback.format_exc()}")
-
-        # Start the websocket connection using BinanceConnector
         try:
+            # Start synchronous websocket in a thread
             self.ws_client, self.ws_thread = self.connector.start_websocket_stream(
                 symbol=self.asset,
                 interval=self.config.interval,
@@ -108,57 +83,69 @@ class WebSocketListenerService:
             )
 
             self.connected = True
-            self.last_message_time = time.time()  # Initialize time
+            self.last_message_time = time.time()
             self.monitor.report_connection_status(self.asset, True)
 
-            # Keep checking the connection
+            # Monitor connection health
             while self.should_run:
-                await asyncio.sleep(30)  # Check connection status every 30 seconds
+                await asyncio.sleep(10) # Check every 10 seconds
 
-                # Check if websocket is still connected
-                if not (self.ws_client and self.ws_client.sock and self.ws_client.sock.connected):
-                    self.logger.warning(f"WebSocket for {self.asset} disconnected, reconnecting...")
+                # 1. Stale Data Check (Heartbeat)
+                if time.time() - self.last_message_time > 180: # 3 minutes
+                    self.logger.warning(f"No messages for {self.asset} > 3m. Reconnecting...")
                     break
+                
+                # 2. Library Connection Check (Safe wrapper)
+                try:
+                    if self.ws_client and hasattr(self.ws_client, 'sock') and self.ws_client.sock:
+                        if not self.ws_client.sock.connected:
+                            self.logger.warning(f"Socket disconnected for {self.asset}")
+                            break
+                except Exception:
+                    pass # Ignore internal library attribute errors
 
-                # Check for stale connection
-                if time.time() - self.last_message_time > 180:
-                    self.logger.warning(f"No messages received for {self.asset} in last 3 minutes, reconnecting...")
-                    break
         except Exception as e:
-            self.logger.error(f"Error establishing WebSocket connection for {self.asset}: {str(e)}")
+            self.logger.error(f"WebSocket connection failed for {self.asset}: {e}")
             raise
         finally:
-            # Clean up connection in all cases
-            if self.ws_client:
-                try:
-                    self.connector.stop_websocket_stream(self.ws_client)
-                except Exception as e:
-                    self.logger.error(f"Error closing WebSocket for {self.asset}: {str(e)}")
+            self._cleanup_connection()
 
-            self.ws_client = None
-            self.ws_thread = None
+    def _cleanup_connection(self):
+        """Helper to safely stop the websocket client"""
+        if self.ws_client:
+            try:
+                self.connector.stop_websocket_stream(self.ws_client)
+            except Exception as e:
+                self.logger.error(f"Error stopping websocket for {self.asset}: {e}")
+        
+        self.ws_client = None
+        self.ws_thread = None
+        
+        if self.connected:
             self.connected = False
             self.monitor.report_connection_status(self.asset, False)
-            self.logger.info(f"Disconnected from websocket for {self.asset}")
+            self.logger.info(f"Disconnected websocket for {self.asset}")
 
     async def _handle_incoming_message(self, data):
-        """Process websocket message asynchronously"""
+        """
+        Process websocket message asynchronously.
+        ALL logic (parsing, metrics, logging) happens here.
+        """
         try:
-            # Track last message time
             self.last_message_time = time.time()
+            
+            # Only report metrics here (Thread Safe)
             self.monitor.report_message_received(self.asset)
 
-            # Process kline data
             if "k" in data:
                 kline = data["k"]
-
-                # Convert to common message format
+                
                 message = {
                     'symbol': self.asset,
-                    'candle' : {
+                    'candle': {
                         'timestamp': kline.get("t"),
-                        'close': float(kline.get("c")),  # Use close price
-                        'volume': float(kline.get("v")),  # Volume
+                        'close': float(kline.get("c")),
+                        'volume': float(kline.get("v")),
                         'open': float(kline.get("o")),
                         'high': float(kline.get("h")),
                         'low': float(kline.get("l")),
@@ -168,20 +155,13 @@ class WebSocketListenerService:
                     }
                 }
 
-                # Send a message to write queue
                 await self.write_queue.put(message)
 
         except Exception as e:
-            self.logger.error(f"Error processing message for {self.asset}: {e}")
+            self.logger.error(f"Error processing message for {self.asset}: {e}", exc_info=True)
 
     async def stop(self):
         """Stop the websocket listener."""
         self.logger.info(f"Stopping websocket listener for {self.asset}")
         self.should_run = False
-
-        if self.ws_client:
-            self.connector.stop_websocket_stream(self.ws_client)
-            self.ws_client = None
-            self.ws_thread = None
-
-        self.connected = False
+        self._cleanup_connection()

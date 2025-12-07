@@ -21,7 +21,6 @@ class RedisConfig:
 
         # Connection pool settings
         self.max_connections = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
-        self.retry_on_timeout = True
         self.socket_timeout = int(os.getenv("REDIS_SOCKET_TIMEOUT", "5"))
 
         # Default TTL settings

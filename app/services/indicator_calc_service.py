@@ -1,3 +1,5 @@
+from app.orchestration.indicator.ta_orchestrator import TechnicalAnalysisOrchestrator
+from app.db.redis_handler import RedisHandler
 import asyncio
 import logging
 import os
@@ -8,17 +10,10 @@ from dotenv import load_dotenv
 
 from app.db.mtf_data_manager import MTFDataManager
 from app.models.indicator_context import IndicatorExecutionContext
-from app.orchestration.indicator.rsi_orchestrator import OscillatorOrchestrator
-from app.orchestration.indicator.sma_orchestrator import MovingAverageOrchestrator
-from app.orchestration.indicator.trendline_orchestrator import TrendAnalysisOrchestrator
 from app.orchestration.indicator_pipeline import IndicatorPipeline
 from app.orchestration.processor.mtf_confluence_processor import (
     SignalAggregationProcessor,
 )
-from app.orchestration.processor.telegram_notification_processor import (
-    TelegramNotificationProcessor,
-)
-from app.telegram import TelegramClient, telegram_client
 from config.asset_indicator_config import ConfigurationManager
 
 load_dotenv()
@@ -52,6 +47,7 @@ class IndicatorCalcService:
         last_calculation: Dict[str, float],
         config: Optional[IndicatorCalcServiceConfig] = None,
         config_manager: Optional[ConfigurationManager] = None,
+        redis_handler: Optional[RedisHandler] = None,
     ):
         self.calculator_id = calculator_id
         self.calc_queue = calc_queue
@@ -62,29 +58,26 @@ class IndicatorCalcService:
         self.config = config or IndicatorCalcServiceConfig()
         self.logger = logging.getLogger(self.config.logger_name)
         self.config_manager = config_manager
+        self.redis_handler = redis_handler
 
         # Initialize components
         self.mtf_data_manager = MTFDataManager(
-            self.db_pool, lookback_hours=self.config.lookback_hours
+            self.db_pool,
+            lookback_hours=self.config.lookback_hours,
+            redis_handler=self.redis_handler,
         )
         self.indicator_pipeline = IndicatorPipeline()
 
         self._setup_indicator_pipeline()
         self._setup_result_processors()
         self._ensure_charts_directory()
- 
+
     def _setup_indicator_pipeline(self) -> None:
         """Setup indicator pipeline with orchestrators"""
         self.logger.info("Setting up indicator orchestration pipeline")
 
         orchestrators = [
-            TrendAnalysisOrchestrator(
-                self.indicator_registry, config_manager=self.config_manager
-            ),
-            MovingAverageOrchestrator(
-                self.indicator_registry, config_manager=self.config_manager
-            ),
-            OscillatorOrchestrator(
+            TechnicalAnalysisOrchestrator(
                 self.indicator_registry, config_manager=self.config_manager
             ),
         ]
@@ -123,19 +116,42 @@ class IndicatorCalcService:
         while self.should_run:
             asset = None
             try:
-                asset = await asyncio.wait_for(
+                task = await asyncio.wait_for(
                     self.calc_queue.get(), timeout=self.config.queue_timeout
                 )
-                await self._calculate_indicators(asset)
+
+                if isinstance(task, dict):
+                    task_type = task.get("type")
+                    asset = task.get("asset")
+
+                    if task_type == "INDICATOR_UPDATE":
+                        await self._calculate_indicators(asset)
+                    elif task_type == "REGIME_UPDATE":
+                        await self._handle_regime_update(asset)
+                    else:
+                        self.logger.warning(f"Unknown task type: {task_type}")
+                elif isinstance(task, str):
+                    await self._calculate_indicators(task)
+
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 self.logger.error(f"Error in calculator {self.calculator_id}: {e}")
             finally:
-                if asset is not None:
+                if task is not None:
                     self.calc_queue.task_done()
 
         self.logger.info(f"Indicator calculator {self.calculator_id} stopped")
+
+    async def _handle_regime_update(self, asset: str) -> None:
+        """Handle market regime update task"""
+        try:
+            self.logger.info(f"Processing regime update for {asset}")
+            # TODO: Implement actual regime detection logic here
+            # For now, we can just log it or trigger a specific pipeline
+            pass
+        except Exception as e:
+            self.logger.error(f"Error updating regime for {asset}: {e}")
 
     async def _calculate_indicators(self, asset: str) -> None:
         """Calculate indicators for given asset using orchestration pipeline"""

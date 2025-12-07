@@ -1,0 +1,389 @@
+# ============================================================================
+# Multi-Timeframe Support & Resistance Configuration
+# ============================================================================
+
+general:
+  data_source: "redis"  # redis, api, csv
+  cache_enabled: true
+  log_level: "INFO"
+  asset_type: "crypto"  # crypto, stocks, forex (affects overrides)
+
+# ============================================================================
+# TIMEFRAME DEFINITIONS
+# ============================================================================
+timeframes:
+  intraday_scalping:
+    primary: "15m"
+    higher: ["1h", "4h", "1d"]
+    lower: ["5m"]
+  
+  swing_trading:
+    primary: "4h"
+    higher: ["1d", "1w"]
+    lower: ["1h"]
+  
+  # Active mode (set by user)
+  active_mode: "intraday_scalping"
+
+# ============================================================================
+# PIVOT DETECTION PARAMETERS
+# ============================================================================
+pivot_detection:
+  # Lookback windows
+  lookback:
+    n1_min: 5
+    n1_max: 10
+    n2_min: 3
+    n2_max: 6
+    
+    # Per-timeframe defaults
+    defaults:
+      "5m": {n1: 6, n2: 4}
+      "15m": {n1: 8, n2: 6}
+      "30m": {n1: 8, n2: 6}
+      "1h": {n1: 10, n2: 6}
+      "4h": {n1: 10, n2: 8}
+      "1d": {n1: 12, n2: 8}
+      "1w": {n1: 15, n2: 10}
+  
+  # Historical depth (bars to analyze)
+  historical_depth:
+    "5m": 200
+    "15m": 300
+    "30m": 250
+    "1h": 200
+    "4h": 150
+    "1d": 100
+    "1w": 50
+  
+  # Price smoothing (reduce noise)
+  smoothing:
+    enabled: true
+    method: "ema"  # ema, sma, none
+    period: 3
+
+# ============================================================================
+# ZONE FORMATION PARAMETERS
+# ============================================================================
+zone_formation:
+  # ATR-based zone width
+  atr:
+    period: 14
+    source: "close"  # close, hl2, hlc3
+  
+  # Zone width multipliers
+  width_multiplier:
+    min: 0.3
+    max: 0.5
+    default: 0.4
+  
+  # Clustering
+  clustering:
+    tolerance_multiplier: 1.2  # Extends zone_width for grouping
+    min_pivots_per_zone: 2
+  
+  # Volume weighting
+  volume_weighted_center: true
+  
+  # Minimum touches to validate
+  min_touch_count: 2
+
+# ============================================================================
+# VALIDATION PARAMETERS
+# ============================================================================
+validation:
+  # Wick rejection criteria
+  wick_rejection:
+    enabled: true
+    wick_to_body_ratio: 1.5
+    min_rejection_ratio: 0.5  # % of touches showing rejection
+    count_doji_as_rejection: true  # Doji = uncertainty
+  
+  # Volume confirmation
+  volume_confirmation:
+    enabled: true
+    touch_volume_multiplier: 1.2
+    breakout_volume_multiplier: 1.5
+    use_relative_volume: true  # vs recent average
+    volume_lookback: 20  # bars for average
+  
+  # Strength filtering
+  strength:
+    min_threshold: 2.5
+    high_confidence: 4.0
+    critical_confidence: 6.0
+
+# ============================================================================
+# MULTI-TIMEFRAME CONFLUENCE
+# ============================================================================
+confluence:
+  # Base timeframe weights
+  timeframe_weights:
+    "1w": 6.0
+    "1d": 5.0
+    "4h": 4.0
+    "1h": 3.0
+    "30m": 2.5
+    "15m": 2.0
+    "5m": 1.0
+    "1m": 0.5
+  
+  # Age decay
+  age_decay:
+    enabled: true
+    lambda: 0.003
+    max_age_bars: 1000
+    exponential_after_bars: 500  # Aggressive decay after this
+  
+  # Inactivity penalty
+  inactivity_penalty:
+    enabled: true
+    threshold_bars: 100  # No touch in X bars
+    decay_rate: 0.8  # Exponential decay factor
+  
+  # Touch bonuses
+  touch_bonus:
+    multiplier: 0.3  # Per additional touch
+    max_bonus: 2.0  # Cap total bonus
+
+# ============================================================================
+# FIBONACCI CONFLUENCE
+# ============================================================================
+fibonacci:
+  enabled: true
+  
+  # Fib levels to calculate
+  levels:
+    - 0.0
+    - 0.236
+    - 0.382
+    - 0.5
+    - 0.618
+    - 0.786
+    - 1.0
+  
+  # Timeframes for MTF Fib
+  timeframes: ["current", "1d", "1w"]
+  
+  # Swing detection
+  swing_lookback: 50  # bars for pivot high/low
+  
+  # Matching tolerance
+  tolerance_multiplier: 0.5  # * ATR
+  
+  # Confluence weight per match
+  confluence_weight: 0.3
+  
+  # Dynamic invalidation
+  dynamic_invalidation:
+    enabled: true
+    break_threshold: 0.02  # 2% beyond Fib level
+  
+  # Visualization (for future charting)
+  colors:
+    current: "#FFEB3B"   # Yellow
+    "1d": "#FF9800"      # Orange
+    "1w": "#9C27B0"      # Purple
+
+# ============================================================================
+# EMA CONFLUENCE (Dynamic Levels)
+# ============================================================================
+ema_confluence:
+  enabled: true
+  
+  # EMA periods
+  periods: [20, 50, 200]
+  
+  # Timeframes
+  timeframes: ["current", "1h", "4h", "1d"]
+  
+  # Proximity matching
+  tolerance_multiplier: 0.3  # * ATR
+  
+  # Confluence weights
+  weights:
+    20: 0.3
+    50: 0.4
+    200: 0.6
+  
+  # Cross bonuses
+  golden_death_cross:
+    enabled: true
+    bonus_weight: 1.0
+    lookback_bars: 5  # Recent cross
+  
+  # Treat as static S/R
+  create_ema_zones: false  # If true, adds EMA as separate levels
+
+# ============================================================================
+# ROUND NUMBER DETECTION
+# ============================================================================
+round_numbers:
+  enabled: true
+  
+  # Detection rules
+  rules:
+    # Integers (e.g., 50000, 1000)
+    - type: "integer"
+      decimals: 0
+      weight: 0.3
+    
+    # Ends with specific values
+    - type: "ends_with"
+      values: [0, 00, 000, 500, 5000]
+      weight: 0.4
+    
+    # Two decimal places (e.g., 100.00)
+    - type: "decimals"
+      places: 2
+      weight: 0.2
+  
+  # Matching tolerance
+  tolerance_pct: 0.002  # 0.2%
+  
+  # Minimum price threshold (avoid noise on low prices)
+  min_price: 10.0
+
+# ============================================================================
+# PRIORITY & LIQUIDITY SCORING
+# ============================================================================
+priority_scoring:
+  # Liquidity score components (weights)
+  components:
+    base_strength: 1.0
+    touch_count: 0.5
+    rejection_count: 0.3
+    timeframe_count: 0.4
+    fibonacci_bonus: 0.3
+    ema_bonus: 0.4
+    round_number_bonus: 0.3
+    volume_quality: 0.5
+  
+  # Priority thresholds
+  thresholds:
+    critical: 8.0
+    high: 5.0
+    medium: 3.0
+    # Below 3.0 = LOW
+  
+  # Only keep levels above minimum
+  min_liquidity_score: 2.0
+
+# ============================================================================
+# DYNAMIC UPDATES
+# ============================================================================
+dynamic_updates:
+  # Breakout handling
+  breakout:
+    volume_multiplier: 1.5
+    strength_reduction: 0.7
+    flip_support_resistance: true
+    require_retest: false  # If true, wait for backtest before flip
+  
+  # Real-time updates
+  update_frequency:
+    realtime_mode: true
+    check_interval_seconds: 60
+  
+  # Cleanup
+  cleanup:
+    remove_broken_levels: false
+    remove_weak_levels: true
+    weak_threshold: 1.0
+    cleanup_interval_bars: 100
+
+# ============================================================================
+# ASSET-SPECIFIC OVERRIDES
+# ============================================================================
+asset_overrides:
+  crypto:
+    zone_formation:
+      width_multiplier:
+        default: 0.5
+    
+    validation:
+      wick_rejection:
+        wick_to_body_ratio: 1.3
+      volume_confirmation:
+        breakout_volume_multiplier: 2.0
+    
+    confluence:
+      age_decay:
+        lambda: 0.005
+    
+    fibonacci:
+      tolerance_multiplier: 0.6
+  
+  stocks:
+    zone_formation:
+      width_multiplier:
+        default: 0.35
+    
+    validation:
+      volume_confirmation:
+        touch_volume_multiplier: 1.5
+    
+    confluence:
+      age_decay:
+        lambda: 0.002
+    
+    round_numbers:
+      enabled: true
+      tolerance_pct: 0.001
+  
+  forex:
+    zone_formation:
+      width_multiplier:
+        default: 0.4
+    
+    validation:
+      wick_rejection:
+        wick_to_body_ratio: 1.4
+    
+    fibonacci:
+      tolerance_multiplier: 0.5
+
+# ============================================================================
+# MERGING PARAMETERS
+# ============================================================================
+merging:
+  # Deduplication tolerance
+  price_tolerance_pct: 0.001  # 0.1%
+  
+  # Confluence method
+  method: "weighted_sum"  # weighted_sum, max, average
+  
+  # Duplicate handling
+  keep_strongest: true
+  merge_overlapping_zones: true
+  overlap_threshold_pct: 0.5  # 50% overlap
+
+# ============================================================================
+# OUTPUT & NOTIFICATIONS
+# ============================================================================
+output:
+  format: "json"  # json, dict, dataframe
+  include_metadata: true
+  include_raw_pivots: false
+  include_touches: true
+  decimal_precision: 4
+
+notifications:
+  enabled: true
+  
+  # Trigger conditions
+  conditions:
+    strength_above: 4.0
+    priority_levels: ["CRITICAL", "HIGH"]
+    new_level_formed: true
+    level_broken: true
+    price_near_level: true  # Within 1 ATR
+  
+  # Rate limiting
+  cooldown_seconds: 300
+  max_alerts_per_hour: 12
+  
+  # Telegram integration
+  telegram:
+    enabled: true
+    format: "detailed"  # detailed, summary, minimal

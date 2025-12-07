@@ -32,6 +32,7 @@ class CalcSchedulerService:
 
         # Indicator calculation settings
         self.min_calculation_interval = 60  # 60 seconds between indicator calculations
+        self.max_queue_size = 200  # Max queue size before skipping scheduling
 
         # Regime update tracking - per asset
         self.last_regime_update: Dict[str, float] = {asset: 0 for asset in assets}
@@ -116,7 +117,17 @@ class CalcSchedulerService:
         last_calc_time = self.last_calculation.get(asset, 0)
 
         if current_time - last_calc_time >= self.min_calculation_interval:
-            await self.calc_queue.put(asset)
+            # Prevent queue flooding if consumer is backed up
+            if self.calc_queue.qsize() > self.max_queue_size:
+                self.logger.warning(f"Calc queue full ({self.calc_queue.qsize()}), skipping schedule for {asset}")
+                return
+
+            task = {
+                "type": "INDICATOR_UPDATE",
+                "asset": asset,
+                "timestamp": current_time
+            }
+            await self.calc_queue.put(task)
 
             self.last_calculation[asset] = current_time
             self.logger.debug(f"Scheduled indicator calculation for {asset}")
@@ -136,10 +147,15 @@ class CalcSchedulerService:
         regime_interval = self.regime_update_intervals.get(asset, 900)  # Default 15m
 
         if current_time - last_regime_time >= regime_interval:
-            await self.calc_queue.put(asset)
+            task = {
+                "type": "REGIME_UPDATE",
+                "asset": asset,
+                "timestamp": current_time
+            }
+            await self.calc_queue.put(task)
 
             self.last_regime_update[asset] = current_time
-            self.logger.info(f"Scheduled regime update for {asset} (interval: {regime_interval}s)")
+            self.logger.info(f"Scheduled regime update for {asset}")
 
     def get_scheduler_status(self) -> Dict[str, any]:
         """Get overall scheduler status"""

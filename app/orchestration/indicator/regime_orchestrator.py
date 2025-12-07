@@ -16,7 +16,7 @@ class RegimeConfig:
     confidence_threshold: float
     description: str
 
-class RegimeClassifier:
+class RegimeOrchestrator:
     """
     Market regime classifier that analyzes multiple indicators to determine
     current market conditions and suggest optimal parameters.

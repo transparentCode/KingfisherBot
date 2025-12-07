@@ -4,7 +4,7 @@ import threading
 from typing import Optional, Any, Dict, List
 import json
 
-import aioredis
+import redis.asyncio as redis
 from dotenv import load_dotenv
 
 from app.models.RedisConfig import RedisConfig
@@ -32,7 +32,7 @@ class RedisHandler:
             
         self.config = RedisConfig() if config is None else config
         self.logger = logging.getLogger(self.config.logger_name)
-        self.redis_pool = None
+        self.redis_client: Optional[redis.Redis] = None
         self._initialize_lock = asyncio.Lock()
         
         # State tracking
@@ -42,22 +42,20 @@ class RedisHandler:
     async def initialize(self):
         """Initialize Redis connection pool"""
         async with self._initialize_lock:
-            if self.redis_pool is None:
+            if self.redis_client is None:
                 self.logger.info("Initializing Redis connection pool...")
                 try:
-                    # Create connection pool
-                    self.redis_pool = aioredis.ConnectionPool.from_url(
+                    # Create Redis client with connection pool
+                    self.redis_client = await redis.from_url(
                         self.config.redis_url,
                         max_connections=self.config.max_connections,
-                        retry_on_timeout=self.config.retry_on_timeout,
                         socket_timeout=self.config.socket_timeout,
                         encoding="utf-8",
                         decode_responses=True,
                     )
 
                     # Test connection
-                    redis_client = aioredis.Redis(connection_pool=self.redis_pool)
-                    await redis_client.ping()
+                    await self.redis_client.ping()
 
                     self.connected = True
                     self.logger.info(
@@ -71,25 +69,23 @@ class RedisHandler:
 
     async def close(self):
         """Close Redis connection pool"""
-        if self.redis_pool:
-            await self.redis_pool.disconnect()
-            self.redis_pool = None
+        if self.redis_client:
+            await self.redis_client.aclose()
+            self.redis_client = None
             self.connected = False
             self.logger.info("Redis connection pool closed.")
 
-    async def _get_client(self) -> aioredis.Redis:
+    async def _get_client(self) -> redis.Redis:
         """Get Redis client from pool"""
-        if not self.redis_pool:
+        if not self.redis_client:
             await self.initialize()
-        return aioredis.Redis(connection_pool=self.redis_pool)
+        return self.redis_client
 
     # ================================
     # Market Data Caching Methods
     # ================================
 
-    async def cache_market_data(
-        self, symbol: str, timeframe: str, data: Any, ttl: Optional[int] = None
-    ) -> bool:
+    async def cache_market_data(self, symbol: str, timeframe: str, data: Any, ttl: Optional[int] = None) -> bool:
         """Cache market data (OHLCV) with automatic serialization"""
         try:
             client = await self._get_client()
