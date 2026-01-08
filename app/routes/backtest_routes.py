@@ -6,6 +6,7 @@ import json
 
 from app.backtest.backtest_engine import VectorBTBacktest
 from app.exchange.BinanceConnector import BinanceConnector
+from app.orchestration.strategy.strategy_orchestrator import StrategyFactory
 
 backtest_bp = Blueprint('backtest', __name__)
 
@@ -27,7 +28,7 @@ def run_backtest():
     df = connector.get_historical_data(symbol, interval, lookback_days)
 
     # Create and execute strategy
-    factory = None
+    factory = StrategyFactory()
     strategy = factory.create_strategy(strategy_id, **strategy_params)
     strategy_results = strategy.execute(df)
 
@@ -75,9 +76,82 @@ def get_backtest_plot():
         plot_json = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
         plot_data = json.loads(plot_json)
 
+        # --- TVLC FORMATTING START ---
+        tvlc_data = {
+            'candles': [],
+            'lines': [],
+            'markers': []
+        }
+        
+        # Backtest results usually contain price data and equity curve
+        # We can extract price from the input df
+        for idx, row in df.iterrows():
+            tvlc_data['candles'].append({
+                'time': int(idx.timestamp()),
+                'open': row['open'],
+                'high': row['high'],
+                'low': row['low'],
+                'close': row['close']
+            })
+
+        # Extract Equity Curve from Plotly data if possible, or from backtest object
+        # VectorBT plot_results usually puts Equity in a scatter trace
+        if isinstance(plot_data, dict) and 'data' in plot_data:
+            for trace in plot_data['data']:
+                name = trace.get('name', '')
+                if 'Equity' in name or 'Value' in name:
+                    x_vals = trace.get('x', [])
+                    y_vals = trace.get('y', [])
+                    
+                    line_series = {
+                        'name': 'Equity',
+                        'color': '#2962FF',
+                        'lineWidth': 2,
+                        'priceScaleId': 'equity', # Separate scale for equity
+                        'data': []
+                    }
+                    
+                    for i, x in enumerate(x_vals):
+                        try:
+                            ts = int(pd.Timestamp(x).timestamp())
+                            val = y_vals[i]
+                            if val is not None:
+                                line_series['data'].append({'time': ts, 'value': val})
+                        except:
+                            continue
+                            
+                    if line_series['data']:
+                        tvlc_data['lines'].append(line_series)
+                        
+                # Extract Buy/Sell Signals
+                if 'Buy' in name or 'Sell' in name:
+                    color = 'lime' if 'Buy' in name else 'red'
+                    position = 'belowBar' if 'Buy' in name else 'aboveBar'
+                    shape = 'arrowUp' if 'Buy' in name else 'arrowDown'
+                    
+                    x_vals = trace.get('x', [])
+                    y_vals = trace.get('y', [])
+                    
+                    for i, x in enumerate(x_vals):
+                        try:
+                            ts = int(pd.Timestamp(x).timestamp())
+                            val = y_vals[i]
+                            if val is not None:
+                                tvlc_data['markers'].append({
+                                    'time': ts,
+                                    'position': position,
+                                    'color': color,
+                                    'shape': shape,
+                                    'text': name[:1]
+                                })
+                        except:
+                            continue
+        # --- TVLC FORMATTING END ---
+
         return jsonify({
             'success': True,
             'plot_data': plot_data,
+            'tvlc_data': tvlc_data, # New field
             'symbol': symbol,
             'interval': interval,
             'strategy_id': strategy_id

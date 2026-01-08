@@ -3,11 +3,12 @@ import threading
 from typing import Dict, Any, Optional, Type, List
 from dataclasses import dataclass
 
-from app.indicators.custom_supertrend import StudentTSuperTrend
 from app.indicators.exponential_moving_average import ExponentialMovingAverage
 from app.indicators.rsi import RSI
-from app.indicators.simple_moving_average import SimpleMovingAverage
-from app.indicators.trendline_with_breaks import TrendLineWithBreaks
+from app.indicators.fractal_channel import FractalChannel
+from app.indicators.volume_profile import VolumeProfile
+from app.indicators.volume_weighted_regression import VolumeWeightedRegression
+from app.indicators.regime_metrices import RegimeMetrics
 
 
 @dataclass
@@ -199,17 +200,7 @@ class IndicatorRegistry:
         """Register default indicators and return registry instance"""
         registry = IndicatorRegistry()
 
-        if registry.registered_indicators:
-            return registry
-
         default_indicators = [
-            # {
-            #     'indicator_id': 'SMA',
-            #     'display_name': 'Simple Moving Average',
-            #     'class_ref': SimpleMovingAverage,
-            #     'description': 'Basic moving average indicator',
-            #     'category': 'Moving Averages'
-            # },
             {
                 'indicator_id': 'EMA',
                 'display_name': 'Exponential Moving Average',
@@ -224,23 +215,36 @@ class IndicatorRegistry:
                 'description': 'Advanced RSI with Gaussian weighting',
                 'category': 'Oscillators'
             },
+            # FractalChannel removed from default registry as it has a dedicated view
             {
-                'indicator_id': 'supertrend',
-                'display_name': 'Supertrend Indicator',
-                'class_ref': StudentTSuperTrend,
-                'description': 'Trend-following indicator based on ATR',
-                'category': 'Trend Analysis'
+                'indicator_id': 'VolumeProfile',
+                'display_name': 'Volume Profile',
+                'class_ref': VolumeProfile,
+                'description': 'Volume distribution over price levels',
+                'category': 'Volume'
             },
             {
-                'indicator_id': 'TrendLineWithBreaks',
-                'display_name': 'Trend Line with Breaks',
-                'class_ref': TrendLineWithBreaks,
-                'description': 'Dynamic trend lines that adapt to price breaks',
-                'category': 'Trendlines'
+                'indicator_id': 'VWR',
+                'display_name': 'Volume Weighted Regression',
+                'class_ref': VolumeWeightedRegression,
+                'description': 'Trend analysis using volume-weighted regression',
+                'category': 'Trend'
+            },
+            {
+                'indicator_id': 'RegimeMetrics',
+                'display_name': 'Regime Metrics',
+                'class_ref': RegimeMetrics,
+                'description': 'Market regime classification (Hurst, Skew, Kurtosis)',
+                'category': 'Analysis'
             }
         ]
 
         for indicator_config in default_indicators:
+            # Force update FractalChannel to pick up code changes
+            if indicator_config['indicator_id'] == 'FractalChannel':
+                if 'FractalChannel' in registry.registered_indicators:
+                    del registry.registered_indicators['FractalChannel']
+            
             try:
                 registry.register_indicator(**indicator_config)
             except Exception as e:

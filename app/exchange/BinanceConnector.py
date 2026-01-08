@@ -103,6 +103,71 @@ class BinanceConnector:
         start_time = int((datetime.now().timestamp() - lookback_days * 24 * 60 * 60) * 1000)
         return self.get_futures_klines(symbol, interval, start_time, int(datetime.now().timestamp() * 1000))
 
+    # -------------------------------------------------------------------------
+    # Execution Methods
+    # -------------------------------------------------------------------------
+
+    def get_account_info(self):
+        """Get account information including balances."""
+        try:
+            return self.client.account()
+        except Exception as e:
+            self.logger.error(f"Error fetching account info: {e}")
+            raise
+
+    def get_position_risk(self, symbol: str = None):
+        """Get position risk for a specific symbol or all symbols."""
+        try:
+            return self.client.get_position_risk(symbol=symbol)
+        except Exception as e:
+            self.logger.error(f"Error fetching position risk for {symbol}: {e}")
+            raise
+
+    def place_order(self, symbol: str, side: str, type: str, quantity: float, price: float = None, **kwargs):
+        """
+        Place a new order.
+        :param symbol: Trading symbol (e.g., 'BTCUSDT')
+        :param side: 'BUY' or 'SELL'
+        :param type: 'LIMIT', 'MARKET', 'STOP', etc.
+        :param quantity: Order quantity
+        :param price: Order price (required for LIMIT orders)
+        :param kwargs: Additional arguments (timeInForce, stopPrice, etc.)
+        """
+        try:
+            params = {
+                'symbol': symbol,
+                'side': side,
+                'type': type,
+                'quantity': quantity,
+                **kwargs
+            }
+            if price:
+                params['price'] = price
+            
+            self.logger.info(f"Placing order: {params}")
+            return self.client.new_order(**params)
+        except Exception as e:
+            self.logger.error(f"Error placing order for {symbol}: {e}")
+            raise
+
+    def cancel_order(self, symbol: str, order_id: int):
+        """Cancel an active order."""
+        try:
+            self.logger.info(f"Cancelling order {order_id} for {symbol}")
+            return self.client.cancel_order(symbol=symbol, orderId=order_id)
+        except Exception as e:
+            self.logger.error(f"Error cancelling order {order_id} for {symbol}: {e}")
+            raise
+            
+    def cancel_all_orders(self, symbol: str):
+        """Cancel all open orders for a symbol."""
+        try:
+            self.logger.info(f"Cancelling all orders for {symbol}")
+            return self.client.cancel_open_orders(symbol=symbol)
+        except Exception as e:
+            self.logger.error(f"Error cancelling all orders for {symbol}: {e}")
+            raise
+
     def _create_websocket_connection(self, stream_name: str, message_handler: Callable, symbol: str = None):
         """
         Create a WebSocket connection with standardized setup.

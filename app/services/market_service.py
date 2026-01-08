@@ -16,8 +16,19 @@ from app.services.calc_scheduler_service import CalcSchedulerService
 from app.services.db_writer_service import DBWriter
 from app.services.indicator_calc_service import IndicatorCalcService
 from app.services.monitoring_service import MonitoringSystem
+from app.services.data_cleanup_service import DataCleanupService
 from app.services.websocket_listener_service import WebSocketListenerService
 from config.asset_indicator_config import ConfigurationManager
+from app.enums.AssetStatus import AssetStatus
+from app.services.bar_close_service import BarCloseService
+from app.db.mtf_data_manager import MTFDataManager
+
+# Execution & Risk Imports
+from app.execution.binance_execution import BinanceExecutionService
+from app.execution.paper_execution import PaperExecutionService
+from app.execution.execution_router import ExecutionRouter
+from app.services.safety_service import SafetyService
+from app.risk.risk_manager import RiskManager
 
 dotenv = load_dotenv()
 
@@ -27,11 +38,15 @@ class MarketServiceConfig:
         self.logger_name = "app"
         self.assets = os.getenv("ASSETS").split(',')
         self.previous_days_data = int(os.getenv("PREVIOUS_DAYS_DATA", 30))
+        self.db_worker_count = int(os.getenv("DB_WORKER_COUNT", 4))
+        self.calc_worker_count = int(os.getenv("CALC_WORKER_COUNT", 5))
+        self.data_concurrency_limit = int(os.getenv("DATA_CONCURRENCY_LIMIT", 10))
 
 async def create_db_pool(config: DBConfig) -> DBHandler:
     handler = DBHandler(config)
     await handler.initialize()
     await handler.create_candles_table()
+    await handler.create_regime_table()
     return handler
 
 class MarketService:
@@ -45,23 +60,63 @@ class MarketService:
         self.assets = self.config.assets
         self.config_manager = ConfigurationManager()
         self.redis_handler = RedisHandler()
+        self.db_worker_count = self.config.db_worker_count
+        self.calc_worker_count = self.config.calc_worker_count
+        self.init_semaphore = asyncio.Semaphore(self.config.data_concurrency_limit)
 
         # shared resources
         self.write_queue = asyncio.Queue()
         self.calc_queue = asyncio.Queue()
+        self.bar_close_queue = asyncio.Queue()
+        self.loop = asyncio.get_event_loop()
 
         # components init
         self.db_pool = None
+        self.mtf_data_manager = None
+        self.bar_close_service = None
         self.websocket_listeners = {}
         self.data_processors = []
         self.ta_processors = []
         self.scheduler = None
         self.monitor = None
+        self.cleanup_service = None
 
         # State tracking
         self.running = False
+        self.asset_states = {}
         self.last_calculation = {asset: 0 for asset in self.assets}
         self.last_update = {asset: 0 for asset in self.assets}
+
+        # Initialize Execution & Risk Services
+        self._initialize_execution_services()
+
+    def _initialize_execution_services(self):
+        """Initialize Execution, Safety, and Risk services."""
+        try:
+            # 1. Connectors
+            self.binance_connector = BinanceConnector() # Uses env vars
+            
+            # 2. Execution Services
+            self.binance_execution = BinanceExecutionService(self.binance_connector)
+            self.paper_execution = PaperExecutionService()
+            
+            # 3. Router
+            self.execution_router = ExecutionRouter(
+                binance_service=self.binance_execution,
+                paper_service=self.paper_execution
+            )
+            
+            # 4. Safety Service
+            self.safety_service = SafetyService(self.execution_router)
+            
+            # 5. Risk Manager
+            self.risk_manager = RiskManager(self.config_manager)
+            
+            self.logger.info("Execution and Risk services initialized successfully.")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize execution services: {e}")
+            raise
 
     def _log_configuration_summary(self):
         """Log detailed configuration summary at startup"""
@@ -159,6 +214,37 @@ class MarketService:
         if extra_assets:
             self.logger.info(f"Assets in config but not in environment: {extra_assets}")
 
+    async def initialize_asset(self, asset: str):
+        """
+        Initialize a single asset: Fetch history -> Start WebSocket
+        """
+        try:
+            async with self.init_semaphore:
+                self.logger.info(f"Initializing asset {asset}...")
+                self.asset_states[asset] = AssetStatus.FETCHING_HISTORY.value
+            
+                # 1. Fetch History
+                await self.fetch_historical_data(asset, days=self.config.previous_days_data)
+            
+            # 2. Start WebSocket
+            self.asset_states[asset] = AssetStatus.STARTING_STREAM.value
+            
+            listener = WebSocketListenerService(
+                asset=asset,
+                write_queue=self.write_queue,
+                monitor=self.monitor,
+                bar_close_queue=self.bar_close_queue
+            )
+            asyncio.create_task(listener.start())
+            self.websocket_listeners[asset] = listener
+            
+            self.asset_states[asset] = AssetStatus.READY.value
+            self.logger.info(f"Asset {asset} is fully initialized and running.")
+            
+        except Exception as e:
+            self.asset_states[asset] = AssetStatus.ERROR.value
+            self.logger.error(f"Failed to initialize asset {asset}: {e}")
+
     async def start(self):
         """
         Start all its subcomponents.
@@ -176,21 +262,48 @@ class MarketService:
         self.monitor = MonitoringSystem(self)
         await self.monitor.start()  # Start the monitoring system
 
+        # Initialize MTF Data Manager and Bar Close Service
+        self.mtf_data_manager = MTFDataManager(self.db_pool)
+        monitored_timeframes = ['15m', '30m', '1h', '2h', '4h'] 
+        self.bar_close_service = BarCloseService(
+            queue=self.bar_close_queue,
+            calc_queue=self.calc_queue,
+            mtf_data_manager=self.mtf_data_manager,
+            timeframes=monitored_timeframes
+        )
+        asyncio.create_task(self.bar_close_service.start())
+
+        # Start Data Cleanup Service
+        # Determine charts directory (default is ./charts in root)
+        charts_dir = os.path.join(os.getcwd(), 'charts')
+        
+        self.cleanup_service = DataCleanupService(
+            self.db_pool, 
+            retention_days=self.config.previous_days_data,
+            check_interval_hours=24,
+            charts_dir=charts_dir
+        )
+        # Start as a background task
+        asyncio.create_task(self.cleanup_service.start())
+
         # Start components
-        for i in range(4):
+        for i in range(self.db_worker_count):
             writer = DBWriter(i, self.db_pool, self.write_queue, self.calc_queue)
             writer_task = asyncio.create_task(writer.start())
             self.data_processors.append({"task": writer_task, "service": writer})
             self.logger.info(f"Started DB writer worker {i}")
 
-        for i in range(5):
+        for i in range(self.calc_worker_count):
             calculator = IndicatorCalcService(
                 calculator_id=i,
                 calc_queue=self.calc_queue,
                 db_pool=self.db_pool,
                 last_calculation=self.last_calculation,
                 indicator_registry=IndicatorRegistry(),
-                config_manager=self.config_manager
+                config_manager=self.config_manager,
+                execution_router=self.execution_router,
+                safety_service=self.safety_service,
+                risk_manager=self.risk_manager
             )
             calc_task = asyncio.create_task(calculator.start())
             self.ta_processors.append({"task": calc_task, "service": calculator})
@@ -202,36 +315,17 @@ class MarketService:
             last_calculation=self.last_calculation,
             config_manager=self.config_manager
         )
+        
+        self.logger.info("Starting calculation scheduler...")
         asyncio.create_task(self.scheduler.start())
 
-        # First fetch historical data for all assets
-        self.logger.info("Fetching historical data for all assets...")
-        fetch_tasks = []
+        # Start Asset Initialization Pipeline
+        self.logger.info("Starting asset initialization pipeline...")
         for asset in self.assets:
-            # Fetch 30 days of history by default
-            fetch_task = asyncio.create_task(self.fetch_historical_data(asset, days=self.config.previous_days_data,))
-            fetch_tasks.append(fetch_task)
-            # Add delay between starting fetches to avoid API rate limits
-            await asyncio.sleep(1)
+            self.asset_states[asset] = AssetStatus.PENDING.value
+            asyncio.create_task(self.initialize_asset(asset))
+            await asyncio.sleep(0.5) # Stagger start slightly
 
-        # Wait for all historical data to be fetched
-        if fetch_tasks:
-            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    self.logger.error(f"Failed to fetch historical data for {self.assets[i]}: {result}")
-                else:
-                    self.logger.info(f"Successfully loaded {result} historical candles for {self.assets[i]}")
-
-        # Start websocket listeners for all assets
-        for asset in self.assets:
-            listener = WebSocketListenerService(
-                asset=asset,
-                write_queue=self.write_queue,
-                monitor=self.monitor
-            )
-            self.websocket_listeners[asset] = listener
-            asyncio.create_task(listener.start())
 
         self.logger.info("Market data system started successfully")
 
@@ -266,8 +360,18 @@ class MarketService:
 
         # Add worker statuses
         status["workers"] = {
-            "db_writers": self.data_processors,
-            "calculators": self.ta_processors
+            "db_writers": [
+                {
+                    "id": p["service"].worker_id,
+                    "alive": not p["task"].done()
+                } for p in self.data_processors
+            ],
+            "calculators": [
+                {
+                    "id": p["service"].calculator_id,
+                    "alive": not p["task"].done()
+                } for p in self.ta_processors
+            ]
         }
 
         return status
@@ -365,6 +469,10 @@ class MarketService:
         # Stop monitoring a system first
         if self.monitor:
             await self.monitor.stop()
+
+        # Stop cleanup service
+        if self.cleanup_service:
+            await self.cleanup_service.stop()
 
         # Stop all websocket listeners
         stop_tasks = []

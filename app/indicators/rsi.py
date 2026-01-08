@@ -4,11 +4,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from app.indicators.BaseIndicatorInterface import BaseIndicatorInterface
 from app.utils.price_utils import get_price_source_data
+from app.indicators.fractal_channel import FractalChannel
 
 
 class RSI(BaseIndicatorInterface):
     """
-    Relative Strength Index (RSI) indicator.
+    Relative Strength Index (RSI) indicator with Dynamic Fractal Channel.
     """
 
     def __init__(self, name: str = "RSI", **kwargs):
@@ -17,11 +18,18 @@ class RSI(BaseIndicatorInterface):
         self.source = kwargs.get('source', 'close')
         self.overbought = kwargs.get('overbought', 70)
         self.oversold = kwargs.get('oversold', 30)
+        
+        # Fractal Channel Parameters
+        self.fc_enabled = kwargs.get('fc_enabled', True)
+        self.fc_lookback = kwargs.get('fc_lookback', 50)
+        self.fc_mult = kwargs.get('fc_mult', 2.0)
+        self.fc_zigzag_dev = kwargs.get('fc_zigzag_dev', 0.05)
+        
         self.input_columns = ['open', 'high', 'low', 'close']
         self.category = 'Oscillator'
 
     def calculate(self, data: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        """Calculate traditional RSI."""
+        """Calculate RSI and optional Fractal Channel."""
         df = data.copy()
         source = kwargs.get('source', self.source)
         length = kwargs.get('length', self.length)
@@ -47,6 +55,29 @@ class RSI(BaseIndicatorInterface):
         # Store result
         column_name = f'rsi_{length}_{source}'
         df[column_name] = rsi
+        
+        # Calculate Fractal Channel on RSI if enabled
+        if self.fc_enabled:
+            try:
+                fc = FractalChannel(
+                    mode='dynamic',
+                    pivot_method='zigzag',
+                    zigzag_dev=self.fc_zigzag_dev,
+                    lookback=self.fc_lookback,
+                    mult=self.fc_mult,
+                    source=column_name
+                )
+                # We need to pass the dataframe with the RSI column to FC
+                df_fc = fc.calculate(df)
+                
+                # Merge relevant columns back if they aren't already there
+                # FractalChannel.calculate usually returns the whole DF with new columns
+                # So we can just update df or take the new columns
+                for col in df_fc.columns:
+                    if col not in df.columns:
+                        df[col] = df_fc[col]
+            except Exception as e:
+                print(f"Error calculating Fractal Channel on RSI: {e}")
 
         return df
 
@@ -253,7 +284,7 @@ class RSI(BaseIndicatorInterface):
         return fig
 
     def plot(self, data: pd.DataFrame, **kwargs) -> go.Figure:
-        """Plot RSI indicator."""
+        """Plot RSI indicator with Dynamic Fractal Channel."""
         length = kwargs.get('length', self.length)
         source = kwargs.get('source', self.source)
         column_name = f'rsi_{length}_{source}'
@@ -276,16 +307,63 @@ class RSI(BaseIndicatorInterface):
             x=data['open_time'] if 'open_time' in data.columns else data.index,
             y=data[column_name],
             name=f'RSI({length})',
-            line=dict(color='#D40CC2', width=2)
+            line=dict(color='yellow', width=1.5)
         ), row=2, col=1)
 
+        # Add Fractal Channel if enabled and columns exist
+        if self.fc_enabled:
+            upper_col = f'fc_upper_{self.fc_lookback}_dynamic'
+            lower_col = f'fc_lower_{self.fc_lookback}_dynamic'
+            mid_col = f'fc_mid_{self.fc_lookback}_dynamic'
+            signal_col = 'fc_signal'
+
+            if upper_col in data.columns:
+                fig.add_trace(go.Scatter(
+                    x=data.index, y=data[upper_col],
+                    mode='lines', name='RSI Channel Upper',
+                    line=dict(color='rgba(0, 255, 0, 0.5)', width=1, dash='dash')
+                ), row=2, col=1)
+
+            if lower_col in data.columns:
+                fig.add_trace(go.Scatter(
+                    x=data.index, y=data[lower_col],
+                    mode='lines', name='RSI Channel Lower',
+                    line=dict(color='rgba(255, 0, 0, 0.5)', width=1, dash='dash'),
+                    fill='tonexty'  # Fill between upper and lower (assuming upper added first)
+                ), row=2, col=1)
+
+            if mid_col in data.columns:
+                fig.add_trace(go.Scatter(
+                    x=data.index, y=data[mid_col],
+                    mode='lines', name='RSI Channel Mid',
+                    line=dict(color='gray', width=1)
+                ), row=2, col=1)
+
+            # Plot Signals
+            if signal_col in data.columns:
+                bullish_signals = data[data[signal_col] == 1]
+                bearish_signals = data[data[signal_col] == -1]
+
+                if not bullish_signals.empty:
+                    fig.add_trace(go.Scatter(
+                        x=bullish_signals.index, y=bullish_signals[column_name],
+                        mode='markers', name='Bullish Breakout',
+                        marker=dict(symbol='triangle-up', size=10, color='lime', line=dict(width=1, color='black'))
+                    ), row=2, col=1)
+
+                if not bearish_signals.empty:
+                    fig.add_trace(go.Scatter(
+                        x=bearish_signals.index, y=bearish_signals[column_name],
+                        mode='markers', name='Bearish Breakdown',
+                        marker=dict(symbol='triangle-down', size=10, color='red', line=dict(width=1, color='black'))
+                    ), row=2, col=1)
+
         # Add level lines
-        fig.add_hline(y=self.overbought, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=self.oversold, line_dash="dash", line_color="green", row=2, col=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="grey", row=2, col=1)
+        fig.add_hline(y=self.overbought, line_dash="dot", line_color="white", opacity=0.5, annotation_text="Overbought", row=2, col=1)
+        fig.add_hline(y=self.oversold, line_dash="dot", line_color="white", opacity=0.5, annotation_text="Oversold", row=2, col=1)
 
         fig.update_layout(
-            title_text=f"RSI({length}) Analysis",
+            title_text=f"RSI({length}) Analysis with Fractal Channel",
             xaxis_rangeslider_visible=False,
             template="plotly_dark",
             height=800
@@ -310,6 +388,10 @@ class RSI(BaseIndicatorInterface):
                        'description': 'Source'},
             'overbought': {'type': 'float', 'default': 70, 'min': 50, 'max': 100, 'description': 'Overbought Level'},
             'oversold': {'type': 'float', 'default': 30, 'min': 0, 'max': 50, 'description': 'Oversold Level'},
+            'fc_enabled': {'type': 'bool', 'default': True, 'description': 'Enable Fractal Channel'},
+            'fc_lookback': {'type': 'int', 'default': 50, 'min': 10, 'max': 200, 'description': 'FC Lookback'},
+            'fc_mult': {'type': 'float', 'default': 2.0, 'min': 0.1, 'max': 5.0, 'description': 'FC Multiplier'},
+            'fc_zigzag_dev': {'type': 'float', 'default': 0.05, 'min': 0.01, 'max': 0.2, 'description': 'FC ZigZag Dev'},
             'lookback_left': {'type': 'int', 'default': 5, 'min': 1, 'max': 20, 'description': 'Pivot Lookback Left'},
             'lookback_right': {'type': 'int', 'default': 5, 'min': 1, 'max': 20, 'description': 'Pivot Lookback Right'},
             'range_upper': {'type': 'int', 'default': 60, 'min': 10, 'max': 200,
@@ -328,14 +410,24 @@ class RSI(BaseIndicatorInterface):
 
         clean_data = data[[column_name]].dropna()
 
-        return [{
-            'x': clean_data.index.tolist(),
-            'y': clean_data[column_name].tolist(),
-            'type': 'scatter',
-            'mode': 'lines',
-            'name': f'RSI({length})',
-            'line': {
-                'color': '#D40CC2',
-                'width': 2
+        return {
+            'data': [{
+                'x': clean_data.index.tolist(),
+                'y': clean_data[column_name].tolist(),
+                'type': 'scatter',
+                'mode': 'lines',
+                'name': f'RSI({length})',
+                'line': {
+                    'color': '#D40CC2',
+                    'width': 2
+                }
+            }],
+            'layout_update': {
+                'yaxis2': {
+                    'title': 'RSI',
+                    'overlaying': 'y',
+                    'side': 'right',
+                    'range': [0, 100]
+                }
             }
-        }]
+        }

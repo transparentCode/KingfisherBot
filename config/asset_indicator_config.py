@@ -16,14 +16,14 @@ class ConfigurationManager:
     _instance: Optional['ConfigurationManager'] = None
     _lock = threading.Lock()
 
-    def __new__(cls, config_dir: str = "..") -> 'ConfigurationManager':
+    def __new__(cls, config_dir: str = ".") -> 'ConfigurationManager':
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, config_dir: str = ".."):
+    def __init__(self, config_dir: str = "."):
         # Prevent re-initialization
         if hasattr(self, '_initialized'):
             return

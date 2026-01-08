@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import traceback
 from concurrent.futures.thread import ThreadPoolExecutor
 
 import jinja2
@@ -118,9 +119,10 @@ class TelegramClient:
         """Helper method to run a coroutine and get its result"""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return future.result(timeout=10)  # Add timeout to prevent hanging
+            return future.result(timeout=30)  # Increased timeout to 30s to prevent hanging
         except Exception as e:
-            self.logger.error(f"Error running coroutine: {str(e)}")
+            self.logger.error(f"Error running coroutine: {repr(e)}")
+            self.logger.error(traceback.format_exc())
             return False
 
     async def ensure_bot_connection(self):

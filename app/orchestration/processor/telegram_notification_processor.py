@@ -31,6 +31,89 @@ class TelegramNotificationProcessor:
         await self.redis_handler.initialize()
         self.logger.info("TelegramNotificationProcessor initialized with Redis")
 
+    async def process_results(self, asset: str, all_results: Dict[str, Any]):
+        """
+        Process results from the pipeline (Standard Interface).
+        Listens for 'final_signal' from BotBrain.
+        """
+        if not self.telegram_enabled:
+            return
+
+        try:
+            # 1. Check for BotBrain Signal
+            final_signal = all_results.get('final_signal')
+            if not final_signal:
+                return
+
+            # 2. Extract Details
+            action = final_signal.get('action')
+            confidence = final_signal.get('confidence', 0.0)
+            signal_object = final_signal.get('signal_object') # TradeSignal object
+            
+            if not signal_object:
+                self.logger.warning(f"TelegramProcessor received final_signal without signal_object for {asset}")
+                return
+
+            # 3. Apply Throttle / Policy
+            priority = "high" if confidence > 0.8 else "normal"
+            if not await self.policy.check_global_throttle():
+                self.logger.info("Global throttle active - skipping notification")
+                return
+                
+            # 4. Build Message
+            message = self._build_bot_brain_message(asset, signal_object)
+            
+            # 5. Generate Chart (Optional)
+            chart_path = None
+            if self.config.get('save_charts', False):
+                # We need a dataframe. Try to find one matching the timeframe.
+                df = self._find_dataframe_for_timeframe(all_results, signal_object.timeframe)
+                if df is not None:
+                     chart_path = await self.formatter.generate_chart(
+                        asset, signal_object.timeframe, df, 
+                        f"{signal_object.direction}_{signal_object.setup_type}", 
+                        pd.Timestamp.now()
+                    )
+
+            # 6. Send
+            await self.send_notification(
+                asset, 
+                message, 
+                signal_type=signal_object.setup_type, 
+                priority=priority, 
+                chart_path=chart_path,
+                metadata=signal_object.to_dict()
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error processing results for {asset}: {e}", exc_info=True)
+
+    def _build_bot_brain_message(self, asset: str, signal) -> str:
+        """Format a TradeSignal into a Telegram message"""
+        emoji = "🟢" if signal.direction == "LONG" else "🔴"
+        
+        msg = [
+            f"{emoji} **{signal.direction} {asset}**",
+            f"Setup: {signal.setup_type}",
+            f"Timeframe: {signal.timeframe}",
+            f"Confidence: {signal.confidence:.0%}",
+            "",
+            f"Entry: {signal.entry_price:.4f}",
+            f"Stop Loss: {signal.stop_loss:.4f}",
+            f"Take Profit: {signal.take_profit:.4f}",
+            f"R:R: {signal.risk_reward_ratio:.2f}",
+            "",
+            "**Reasoning:**"
+        ]
+        
+        for k, v in signal.reasoning.items():
+            if isinstance(v, float):
+                msg.append(f"- {k}: {v:.2f}")
+            else:
+                msg.append(f"- {k}: {v}")
+                
+        return "\n".join(msg)
+
     async def process_signals(self, asset: str, composite_signals: List[Dict], raw_results: Dict[str, Any]):
         """Entry point called by SignalAggregationProcessor"""
         if not self.telegram_enabled:

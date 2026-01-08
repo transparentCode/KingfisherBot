@@ -50,5 +50,20 @@ class LoggerFormatter(logging.Formatter):
         if datefmt:
             return ist_dt.strftime(datefmt)
         else:
-            # Higher precision format with milliseconds
-            return ist_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            return ist_dt.isoformat()
+
+
+class FileLoggerFormatter(LoggerFormatter):
+    """
+    Formatter for file logs that does NOT add ANSI colors but keeps the custom time formatting.
+    """
+    def format(self, record):
+        # Call the base logging.Formatter.format, which will use our custom formatTime
+        # We bypass LoggerFormatter.format to avoid adding colors
+        log_message = logging.Formatter.format(self, record)
+
+        # Add extra fields if they exist
+        if hasattr(record, 'extra_data'):
+            log_message += f" | Extra: {record.extra_data}"
+
+        return log_message

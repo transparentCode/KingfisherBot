@@ -7,7 +7,7 @@ from app.orchestration.indicator.indicator_orchestrator import BaseIndicatorOrch
 from config.asset_indicator_config import ConfigurationManager
 
 
-class TrendAnalysisOrchestrator(BaseIndicatorOrchestrator):
+class TrendlineOrchestrator(BaseIndicatorOrchestrator):
     def __init__(self, indicator_registry, min_data_points: int = 20, config_manager: ConfigurationManager = None):
         super().__init__(indicator_registry)
         self.min_data_points = min_data_points
@@ -69,14 +69,9 @@ class TrendAnalysisOrchestrator(BaseIndicatorOrchestrator):
         """Extract latest signal from trend indicator result"""
         latest_signal = {}
 
-        # TrendLineWithBreaks specific columns
-        signal_columns = [
-            'upbreak_signal', 'downbreak_signal', 'upos', 'dnos',
-            'trend_direction', 'signal'
-        ]
-
-        for col in signal_columns:
-            if col in df.columns:
+        # Fractal Channel columns (dynamic names)
+        for col in df.columns:
+            if col.startswith('fc_'):
                 latest_value = df[col].iloc[-1]
                 if not pd.isna(latest_value):
                     latest_signal[col] = latest_value
@@ -85,8 +80,8 @@ class TrendAnalysisOrchestrator(BaseIndicatorOrchestrator):
 
     def _check_new_signals(self, df: pd.DataFrame) -> bool:
         """Check if current bar generated new breakout signals"""
-        if 'upbreak_signal' in df.columns and 'downbreak_signal' in df.columns:
-            latest_upbreak = df['upbreak_signal'].iloc[-1] == 1
-            latest_downbreak = df['downbreak_signal'].iloc[-1] == 1
-            return latest_upbreak or latest_downbreak
+        # Fractal Channel
+        if 'fc_signal' in df.columns:
+            return df['fc_signal'].iloc[-1] != 0
+
         return False

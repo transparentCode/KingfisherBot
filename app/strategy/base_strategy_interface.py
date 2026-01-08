@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import pandas as pd
+from app.strategy.models import StrategySignal
 
 
 class BaseStrategyInterface(ABC):
@@ -27,11 +28,42 @@ class BaseStrategyInterface(ABC):
     def execute(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Execute the strategy on the provided data.
+        Should append signal columns to the dataframe.
 
         :param data: Price data as pandas DataFrame
         :return: DataFrame with strategy signals
         """
         pass
+        
+    def calculate_signal(self, data: pd.DataFrame) -> StrategySignal:
+        """
+        Calculate the signal for the latest candle.
+        Default implementation runs execute() and takes the last row.
+        Override for optimization if needed.
+        """
+        df_result = self.execute(data)
+        if df_result is None or df_result.empty:
+            return StrategySignal(self.strategy_name, 0, 0.0)
+            
+        last_row = df_result.iloc[-1]
+        
+        # Assume 'signal' column exists (1, -1, 0)
+        # Assume 'confidence' column exists (optional, default 1.0)
+        
+        signal = 0
+        if 'signal' in last_row:
+            signal = int(last_row['signal'])
+            
+        confidence = 1.0
+        if 'confidence' in last_row:
+            confidence = float(last_row['confidence'])
+            
+        return StrategySignal(
+            strategy_name=self.strategy_name,
+            signal=signal,
+            confidence=confidence,
+            metadata=last_row.to_dict()
+        )
 
     @abstractmethod
     def plot(self, data: Optional[pd.DataFrame] = None, **kwargs):

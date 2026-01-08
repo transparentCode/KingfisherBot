@@ -296,6 +296,10 @@ class RedisHandler:
             self.logger.error(f"Error setting key {key}: {e}")
             return False
 
+    async def set_key(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Alias for set() to match indicator_calc_service usage"""
+        return await self.set(key, value, ttl)
+
     async def get(self, key: str) -> Optional[Any]:
         """Generic get operation"""
         try:
@@ -352,6 +356,27 @@ class RedisHandler:
             self.logger.error(f"Error clearing pattern {pattern}: {e}")
             return 0
 
+    async def incr(self, key: str, ttl: Optional[int] = None) -> int:
+        """Increment value of a key"""
+        try:
+            client = await self._get_client()
+            val = await client.incr(key)
+            if ttl:
+                await client.expire(key, ttl)
+            return val
+        except Exception as e:
+            self.logger.error(f"Error incrementing key {key}: {e}")
+            return 0
+
+    async def expire(self, key: str, time: int) -> bool:
+        """Set expiration for a key"""
+        try:
+            client = await self._get_client()
+            return await client.expire(key, time)
+        except Exception as e:
+            self.logger.error(f"Error setting expiration for {key}: {e}")
+            return False
+
     # ================================
     # Health & Status Methods
     # ================================
@@ -376,6 +401,46 @@ class RedisHandler:
         except Exception as e:
             self.logger.error(f"Error getting Redis info: {e}")
             return None
+
+    # ================================
+    # System Metrics (Time Series)
+    # ================================
+
+    async def add_metric(self, key: str, value: Dict, max_len: int = 1000) -> bool:
+        """
+        Add a metric data point to a time-series list.
+        Pushes to the right and trims from the left to maintain max_len.
+        """
+        try:
+            client = await self._get_client()
+            serialized_value = json.dumps(value, default=str)
+            
+            # Use a pipeline for atomicity
+            async with client.pipeline() as pipe:
+                pipe.rpush(key, serialized_value)
+                pipe.ltrim(key, -max_len, -1) # Keep only the last max_len elements
+                await pipe.execute()
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"Error adding metric to {key}: {e}")
+            return False
+
+    async def get_metrics(self, key: str, limit: int = 100) -> List[Dict]:
+        """
+        Retrieve the last N metrics from the list.
+        """
+        try:
+            client = await self._get_client()
+            # Get last 'limit' elements
+            # lrange start end (inclusive)
+            # -limit to -1 gets the last 'limit' items
+            raw_data = await client.lrange(key, -limit, -1)
+            
+            return [json.loads(item) for item in raw_data]
+        except Exception as e:
+            self.logger.error(f"Error retrieving metrics from {key}: {e}")
+            return []
 
     async def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache usage statistics"""

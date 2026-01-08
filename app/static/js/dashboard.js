@@ -12,6 +12,7 @@ class TradingDashboard {
         this.zoomState = null;
         this.searchTimeout = null;
         this.lastPrice = null;
+        this.assets = new Map(); // Store asset status
 
         // Performance optimizations
         this.isLoading = false; // Prevent concurrent loads
@@ -26,7 +27,8 @@ class TradingDashboard {
     async init() {
         try {
             await this.loadAvailableIndicators();
-            await this.loadChart();
+            this.startAssetPolling(); // Start polling for assets
+            // await this.loadChart(); // Wait for assets to load first
             this.setupEventListeners();
             this.updateActiveIndicatorsList();
 
@@ -54,6 +56,7 @@ class TradingDashboard {
         // Symbol change
         $('#active-symbol').on('change', (e) => {
             this.currentSymbol = e.target.value;
+            this.updateStatusBadge();
             this.debouncedLoadChart();
         });
 
@@ -76,6 +79,103 @@ class TradingDashboard {
                 this.searchSymbols(e.target.value);
             }, 300);
         });
+    }
+
+    /**
+     * Poll for asset status
+     */
+    async startAssetPolling() {
+        const poll = async () => {
+            try {
+                const response = await fetch('/api/system/assets');
+                const data = await response.json();
+                if (data.success) {
+                    this.updateAssetList(data.assets);
+                }
+            } catch (error) {
+                console.error('Failed to fetch assets:', error);
+            }
+            setTimeout(poll, 5000); // Poll every 5 seconds
+        };
+        poll();
+    }
+
+    /**
+     * Update asset list and status
+     */
+    updateAssetList(assets) {
+        const select = $('#active-symbol');
+        const currentVal = select.val();
+        
+        // Update internal state
+        const oldStatus = this.assets.get(this.currentSymbol);
+        this.assets.clear();
+        assets.forEach(a => this.assets.set(a.symbol, a.status));
+
+        // Rebuild options if list changed (simple check: length or first item)
+        // For robustness, we'll just rebuild if the count is different or if we are in initial load
+        // A better diffing could be done but this is likely fine for now.
+        // Actually, let's just rebuild the options to ensure status icons are up to date in the dropdown too
+        
+        const currentOptions = select.find('option').map((_, opt) => opt.value).get();
+        const newSymbols = assets.map(a => a.symbol);
+        
+        // Check if we need to rebuild dropdown (symbols changed)
+        const symbolsChanged = JSON.stringify(currentOptions) !== JSON.stringify(newSymbols);
+        
+        if (symbolsChanged || select.find('option').first().text() === 'Loading assets...') {
+            select.empty();
+            assets.forEach(asset => {
+                // We won't put the icon in the option text as it might look messy, 
+                // but we could. Let's stick to just the symbol for now in the dropdown
+                // and rely on the badge for status.
+                const option = new Option(asset.symbol, asset.symbol);
+                select.append(option);
+            });
+
+            // Restore selection
+            if (currentVal && newSymbols.includes(currentVal)) {
+                select.val(currentVal);
+            } else if (assets.length > 0) {
+                // Default to first if current selection is invalid/empty
+                select.val(assets[0].symbol);
+                this.currentSymbol = assets[0].symbol;
+                this.loadChart();
+            }
+        }
+
+        // Update status badge
+        this.updateStatusBadge();
+        
+        // If status of current symbol changed, maybe reload chart?
+        // For now, just update the badge.
+    }
+
+    updateStatusBadge() {
+        const status = this.assets.get(this.currentSymbol);
+        const badge = $('#asset-status-badge');
+        
+        badge.removeClass('bg-secondary bg-success bg-warning bg-danger text-dark');
+        badge.empty();
+
+        if (!status) {
+            badge.addClass('bg-secondary').html('<i class="fas fa-question"></i>');
+            return;
+        }
+
+        switch (status) {
+            case 'READY':
+                badge.addClass('bg-success').html('READY');
+                break;
+            case 'FETCHING':
+                badge.addClass('bg-warning text-dark').html('<i class="fas fa-sync fa-spin me-1"></i>SYNC');
+                break;
+            case 'PENDING':
+                badge.addClass('bg-secondary').html('PENDING');
+                break;
+            default:
+                badge.addClass('bg-danger').html(status);
+        }
     }
 
     /**
@@ -422,7 +522,7 @@ class TradingDashboard {
      * Check if indicator should be displayed in subplot
      */
     isSubplotIndicator(indicatorName) {
-        const subplotIndicators = ['RSI', 'MACD', 'Stochastic', 'Williams %R', 'CCI', 'ROC'];
+        const subplotIndicators = ['RSI', 'MACD', 'Stochastic', 'Williams %R', 'CCI', 'ROC', 'RegimeMetrics'];
         return subplotIndicators.some(name =>
             indicatorName.toUpperCase().includes(name.toUpperCase())
         );

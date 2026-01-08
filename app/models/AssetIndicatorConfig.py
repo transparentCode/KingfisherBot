@@ -7,6 +7,7 @@ class AssetIndicatorConfig:
     """Configuration for indicators per asset"""
     asset: str
     enabled: bool = True
+    paper_mode: bool = True  # Default to Paper Trading for safety
     regime_adaptation_enabled: bool = True
     
     # Moving Average configs
@@ -17,6 +18,10 @@ class AssetIndicatorConfig:
     
     # Oscillator configs
     oscillator_configs: Dict[str, Dict] = None
+    
+    # Strategy configs
+    # Format: {'StrategyName': {'weight': 1.0, 'params': {...}}}
+    strategies: Dict[str, Dict] = None
     
     # Timeframe overrides
     timeframe_overrides: Dict[str, list] = None
@@ -36,5 +41,7 @@ class AssetIndicatorConfig:
             self.oscillator_configs = {
                 'rsi': {'period': 14, 'gaussian_weights': True}
             }
+        if self.strategies is None:
+            self.strategies = {}
         if self.timeframe_overrides is None:
             self.timeframe_overrides = {}

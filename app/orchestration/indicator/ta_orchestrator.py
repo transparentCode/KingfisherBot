@@ -55,7 +55,8 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
                     instance = self._create_indicator_instance(indicator_id, **params)
                     if not instance: continue
                     
-                    result_df = instance.calculate(df)
+                    # Use a copy to prevent polluting the cached dataframe with indicator columns
+                    result_df = instance.calculate(df.copy())
                     
                     if result_df is not None and not result_df.empty:
                         key = f"{indicator_id}_{config_name}_{timeframe}"
@@ -63,6 +64,9 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
                             'data': result_df,
                             'metadata': {
                                 'type': 'MA',
+                                'category': 'Moving Averages',
+                                'indicator_id': indicator_id,
+                                'timeframe': timeframe,
                                 'latest': self._get_latest_value(result_df, params.get('col_name')),
                                 'params': params
                             }
@@ -75,9 +79,11 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
     async def _process_oscillators(self, context: IndicatorExecutionContext) -> Dict[str, Any]:
         results = {}
         indicators = self._get_indicators_by_category("Oscillators")
+        self.logger.info(f"Processing Oscillators: Found {len(indicators)} indicators: {list(indicators.keys())}")
 
         for indicator_id, metadata in indicators.items():
             configs = self._get_oscillator_configs(context, indicator_id, metadata.parameter_schema)
+            self.logger.info(f"Configs for {indicator_id}: {list(configs.keys())}")
 
             for config_name, params in configs.items():
                 for timeframe, df in context.data_cache.items():
@@ -92,9 +98,16 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
 
                     # Create & Calculate
                     instance = self._create_indicator_instance(indicator_id, **params)
-                    if not instance: continue
+                    if not instance: 
+                        self.logger.warning(f"Failed to create instance for {indicator_id}")
+                        continue
 
-                    result_df = instance.calculate(df)
+                    # Use a copy to prevent polluting the cached dataframe
+                    try:
+                        result_df = instance.calculate(df.copy())
+                    except Exception as e:
+                        self.logger.error(f"Error calculating {indicator_id}: {e}")
+                        continue
 
                     # Divergence Logic
                     if params.get('detect_divergence'):
@@ -106,13 +119,19 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
                     if result_df is not None and not result_df.empty:
                         metadata = {
                             'type': 'Oscillator',
-                            'latest': self._get_latest_value(result_df),
+                            'category': 'Oscillators',
+                            'indicator_id': indicator_id,
+                            'timeframe': timeframe,
+                            'latest': self._get_latest_value(result_df, params.get('col_name')),
                             'overbought_oversold': self._check_overbought_oversold(result_df, params)
                         }
                         
                         # Add divergence metadata if applicable
                         if params.get('detect_divergence'):
-                            metadata['divergence'] = self._check_current_bar_divergence(result_df)
+                            div_meta = self._check_current_bar_divergence(result_df)
+                            metadata['divergence'] = div_meta
+                            if div_meta.get('has_new_divergence'):
+                                self.logger.info(f"Divergence detected for {indicator_id} on {timeframe}: {div_meta}")
 
                         result_entry = {'data': result_df, 'metadata': metadata}
                         results[cache_key] = result_entry
@@ -120,6 +139,8 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
                         # Cache if expensive
                         if params.get('detect_divergence'):
                             await self._cache_results(context.asset, indicator_id, timeframe, result_entry)
+                    else:
+                        self.logger.warning(f"Result DF empty for {indicator_id} on {timeframe}")
 
         return results
 
@@ -143,7 +164,9 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
         overbought_level = params.get('overbought', 70) if params else 70
         oversold_level = params.get('oversold', 30) if params else 30
 
-        latest_value = self._get_latest_oscillator_reading(df, params)
+        # Use generic helper instead of missing specific one
+        col_name = params.get('col_name') if params else None
+        latest_value = self._get_latest_value(df, col_name)
 
         if latest_value is None:
             return {'overbought': False, 'oversold': False, 'neutral': True}
@@ -207,26 +230,27 @@ class TechnicalAnalysisOrchestrator(BaseIndicatorOrchestrator):
             max_period = period_config.get('max', 100)
 
             return {
-                'fast': {'period': max(min_period, 9), 'source': 'close'},
-                'medium': {'period': max(min_period, 21), 'source': 'close'},
-                'slow': {'period': min(max_period, 50), 'source': 'close'},
-                'trend': {'period': min(max_period, 200), 'source': 'close'}
+                'fast': {'period': max(min_period, 9), 'source': 'close', 'col_name': f"sma_{max(min_period, 9)}_close" if indicator_id == 'SMA' else f"ema_{max(min_period, 9)}_close"},
+                'medium': {'period': max(min_period, 21), 'source': 'close', 'col_name': f"sma_{max(min_period, 21)}_close" if indicator_id == 'SMA' else f"ema_{max(min_period, 21)}_close"},
+                'slow': {'period': min(max_period, 50), 'source': 'close', 'col_name': f"sma_{min(max_period, 50)}_close" if indicator_id == 'SMA' else f"ema_{min(max_period, 50)}_close"},
+                'trend': {'period': min(max_period, 200), 'source': 'close', 'col_name': f"sma_{min(max_period, 200)}_close" if indicator_id == 'SMA' else f"ema_{min(max_period, 200)}_close"}
             }
 
-        return {'default': {'period': 20, 'source': 'close'}}
+        return {'default': {'period': 20, 'source': 'close', 'col_name': 'sma_20_close' if indicator_id == 'SMA' else 'ema_20_close'}}
 
-    def _get_oscillator_configs(self, indicator_id: str, param_schema: dict) -> Dict[str, Dict]:
+    def _get_oscillator_configs(self, context: IndicatorExecutionContext, indicator_id: str, param_schema: dict) -> Dict[str, Dict]:
         """Define different parameter configurations for oscillators"""
 
         if indicator_id == 'RSI':
             return {
-                'default': {'length': 14, 'source': 'close'},
-                'short': {'length': 9, 'source': 'close'},
-                'long': {'length': 21, 'source': 'close'},
+                'default': {'length': 14, 'source': 'close', 'col_name': 'rsi_14_close'},
+                'short': {'length': 9, 'source': 'close', 'col_name': 'rsi_9_close'},
+                'long': {'length': 21, 'source': 'close', 'col_name': 'rsi_21_close'},
                 # Add divergence detection configuration
                 'divergence_detection': {
                     'length': 14,
                     'source': 'close',
+                    'col_name': 'rsi_14_close',
                     'detect_divergence': True,
                     'lookback_left': 5,
                     'lookback_right': 5,

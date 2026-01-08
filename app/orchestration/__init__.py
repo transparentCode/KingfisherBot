@@ -1,11 +1,11 @@
-from app.orchestration.pipeline.indicator_pipeline import IndicatorPipeline
-from app.orchestration.orchestrators.moving_average_orchestrator import MovingAverageOrchestrator
-from app.orchestration.orchestrators.oscillator_orchestrator import OscillatorOrchestrator
-from app.orchestration.orchestrators.trend_analysis_orchestrator import TrendAnalysisOrchestrator
+from app.orchestration.indicator_pipeline import IndicatorPipeline
+from app.orchestration.indicator.ta_orchestrator import TechnicalAnalysisOrchestrator
+from app.orchestration.indicator.regime_orchestrator import RegimeOrchestrator
+from app.orchestration.indicator.trendline_orchestrator import TrendlineOrchestrator
 
 __all__ = [
     'IndicatorPipeline',
-    'MovingAverageOrchestrator',
-    'OscillatorOrchestrator',
-    'TrendAnalysisOrchestrator',
+    'TechnicalAnalysisOrchestrator',
+    'RegimeOrchestrator',
+    'TrendlineOrchestrator',
 ]

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import os
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Set, Any, TYPE_CHECKING
 
@@ -25,9 +26,8 @@ class MonitoringSystem:
         self.system = system
         self.should_run = False
         self.connected_assets: Set[str] = set()
-        self.message_counts: Dict[str, int] = {}
+        self.interval_counts: Dict[str, int] = {}  # Counts since last calculation
         self.message_rate: Dict[str, float] = {}
-        self.last_counts: Dict[str, int] = {}
         
         # Timers
         self.last_rate_calculation = time.time()
@@ -42,10 +42,9 @@ class MonitoringSystem:
         """Initialize metric dictionaries for all assets."""
         # Only add new assets, don't reset existing ones
         for asset in self.system.assets:
-            if asset not in self.message_counts:
-                self.message_counts[asset] = 0
+            if asset not in self.interval_counts:
+                self.interval_counts[asset] = 0
                 self.message_rate[asset] = 0.0
-                self.last_counts[asset] = 0
 
     async def start(self):
         """Start the monitoring system."""
@@ -53,12 +52,51 @@ class MonitoringSystem:
         self.should_run = True
         self._monitoring_task = asyncio.create_task(self._periodic_status_check())
 
+    async def _store_metrics(self):
+        """Store system metrics in Redis for historical graphing."""
+        if not hasattr(self.system, 'redis_handler') or not self.system.redis_handler:
+            return
+
+        try:
+            timestamp = int(time.time() * 1000)
+            
+            # 1. CPU Load (1 min avg)
+            # Note: os.getloadavg() returns (1min, 5min, 15min)
+            load_avg = os.getloadavg()[0]
+            await self.system.redis_handler.add_metric(
+                "metrics:system:cpu_load", 
+                {"ts": timestamp, "val": load_avg}
+            )
+
+            # 2. Queue Depths
+            write_q = self.system.write_queue.qsize()
+            calc_q = self.system.calc_queue.qsize()
+            
+            await self.system.redis_handler.add_metric(
+                "metrics:system:queue_write", 
+                {"ts": timestamp, "val": write_q}
+            )
+            await self.system.redis_handler.add_metric(
+                "metrics:system:queue_calc", 
+                {"ts": timestamp, "val": calc_q}
+            )
+
+            # 3. Message Rate (Total)
+            total_rate = sum(self.message_rate.values())
+            await self.system.redis_handler.add_metric(
+                "metrics:system:msg_rate", 
+                {"ts": timestamp, "val": total_rate}
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error storing metrics: {e}")
+
     async def _periodic_status_check(self):
         """Periodically check system status and report metrics."""
         while self.should_run:
             try:
                 # 1. Ensure metrics exist (lightweight check)
-                if len(self.message_counts) != len(self.system.assets):
+                if len(self.interval_counts) != len(self.system.assets):
                     self._initialize_metrics()
 
                 current_time = time.time()
@@ -67,14 +105,18 @@ class MonitoringSystem:
                 if current_time - self.last_rate_calculation >= self.config.rate_calculation_interval:
                     for asset in self.system.assets:
                         # Handle case where asset might not be in counts yet
-                        current_count = self.message_counts.get(asset, 0)
-                        last_count = self.last_counts.get(asset, 0)
+                        count = self.interval_counts.get(asset, 0)
                         
-                        count_diff = current_count - last_count
-                        self.message_rate[asset] = count_diff / self.config.rate_calculation_interval
-                        self.last_counts[asset] = current_count
+                        # Rate = count / interval
+                        self.message_rate[asset] = count / self.config.rate_calculation_interval
+                        
+                        # Reset counter for next interval
+                        self.interval_counts[asset] = 0
 
                     self.last_rate_calculation = current_time
+                    
+                    # Store metrics after calculation
+                    await self._store_metrics()
 
                 # 3. Check queue sizes
                 write_queue_size = self.system.write_queue.qsize()
@@ -128,19 +170,17 @@ class MonitoringSystem:
                 self.logger.warning(f"Asset {asset} disconnected")
 
         # Initialize metrics for new assets immediately
-        if asset not in self.message_counts:
-            self.message_counts[asset] = 0
+        if asset not in self.interval_counts:
+            self.interval_counts[asset] = 0
             self.message_rate[asset] = 0.0
-            self.last_counts[asset] = 0
 
     def report_message_received(self, asset: str):
         """Report a message received for an asset."""
-        if asset not in self.message_counts:
-            self.message_counts[asset] = 0
+        if asset not in self.interval_counts:
+            self.interval_counts[asset] = 0
             self.message_rate[asset] = 0.0
-            self.last_counts[asset] = 0
 
-        self.message_counts[asset] += 1
+        self.interval_counts[asset] += 1
 
     async def stop(self):
         """Stop the monitoring system."""

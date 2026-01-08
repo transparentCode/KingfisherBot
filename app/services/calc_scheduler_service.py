@@ -130,7 +130,7 @@ class CalcSchedulerService:
             await self.calc_queue.put(task)
 
             self.last_calculation[asset] = current_time
-            self.logger.debug(f"Scheduled indicator calculation for {asset}")
+            self.logger.info(f"Scheduled indicator calculation for {asset}")
 
     async def _schedule_regime_update(self, asset: str, current_time: float):
         """Schedule regime update for an asset if needed"""

@@ -173,7 +173,7 @@ class DBHandler:
                         query += f" AND timestamp <= ${param_count}"
                         params.append(end_time)
 
-                    query += " ORDER BY timestamp DESC"
+                    query += " ORDER BY timestamp ASC"  # Changed from DESC to ASC for correct time series
 
                     if limit:
                         param_count += 1
@@ -270,3 +270,141 @@ class DBHandler:
                 return int(result.split()[-1]) if result else 0
             else:
                 return await conn.fetch(query, *args)
+
+    async def cleanup_old_data(self, retention_days: int = 30):
+        """
+        Delete candles older than retention_days.
+        Uses drop_chunks if TimescaleDB is enabled, otherwise DELETE.
+        """
+        if not self.write_pool:
+            await self.initialize()
+
+        try:
+            async with self.write_pool.acquire() as conn:
+                # Check if TimescaleDB is enabled
+                is_timescale = await conn.fetchval("SELECT COUNT(*) FROM pg_extension WHERE extname = 'timescaledb'")
+
+                if is_timescale:
+                    self.logger.info(f"Cleaning up data older than {retention_days} days using TimescaleDB drop_chunks")
+                    # drop_chunks(relation, older_than)
+                    # older_than can be an interval
+                    query = f"SELECT drop_chunks('candles', INTERVAL '{retention_days} days');"
+                    await conn.execute(query)
+                else:
+                    self.logger.info(f"Cleaning up data older than {retention_days} days using DELETE")
+                    query = f"DELETE FROM candles WHERE timestamp < NOW() - INTERVAL '{retention_days} days';"
+                    result = await conn.execute(query)
+                    deleted_count = int(result.split()[-1]) if result else 0
+                    self.logger.info(f"Deleted {deleted_count} old candles")
+
+        except Exception as e:
+            self.logger.error(f"Error cleaning up old data: {str(e)}")
+
+    async def create_regime_table(self):
+        if not self.write_pool:
+            await self.initialize()
+
+        try:
+            async with self.write_pool.acquire() as conn:
+                # Create table for regime metrics
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS regime_metrics (
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                    hurst NUMERIC,
+                    volatility NUMERIC,
+                    regime TEXT,
+                    trend_strength NUMERIC,
+                    skew NUMERIC,
+                    kurtosis NUMERIC,
+                    PRIMARY KEY (symbol, interval, timestamp)
+                );
+                """)
+                self.logger.info("Regime metrics table created or already exists.")
+
+                # Check if TimescaleDB is installed
+                is_timescale = await conn.fetchval("SELECT COUNT(*) FROM pg_extension WHERE extname = 'timescaledb'")
+
+                if is_timescale:
+                    # Create hypertable
+                    await conn.execute("""
+                    SELECT create_hypertable('regime_metrics', 'timestamp', 
+                                            if_not_exists => TRUE);
+                    """)
+
+                    # Create index
+                    await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_regime_symbol_interval_time
+                    ON regime_metrics (symbol, interval, timestamp DESC);
+                    """)
+
+                self.logger.info("Regime metrics table initialized successfully")
+
+        except Exception as e:
+            self.logger.error(f"Error creating regime metrics table: {str(e)}")
+            raise
+
+    async def write_regime_metrics(self, symbol: str, interval: str, metrics: Dict[str, Any]):
+        if not self.write_pool:
+            await self.initialize()
+
+        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        try:
+            async with self.write_pool.acquire() as conn:
+                timestamp = metrics['timestamp']
+                if isinstance(timestamp, (int, float)):
+                     timestamp = datetime.datetime.fromtimestamp(timestamp / 1000).astimezone(ist_tz)
+                elif isinstance(timestamp, str):
+                     timestamp = datetime.datetime.fromisoformat(timestamp).astimezone(ist_tz)
+                
+                query = """
+                INSERT INTO regime_metrics (symbol, interval, timestamp, hurst, volatility, regime, trend_strength, skew, kurtosis)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (symbol, interval, timestamp) 
+                DO UPDATE SET
+                    hurst = EXCLUDED.hurst,
+                    volatility = EXCLUDED.volatility,
+                    regime = EXCLUDED.regime,
+                    trend_strength = EXCLUDED.trend_strength,
+                    skew = EXCLUDED.skew,
+                    kurtosis = EXCLUDED.kurtosis
+                """
+
+                await conn.execute(query,
+                                   symbol,
+                                   interval,
+                                   timestamp,
+                                   metrics.get('hurst'),
+                                   metrics.get('volatility'),
+                                   metrics.get('regime'),
+                                   metrics.get('trend_strength'),
+                                   metrics.get('skew'),
+                                   metrics.get('kurtosis')
+                                   )
+
+                self.logger.debug(f"Regime metrics for {symbol} written successfully")
+
+        except Exception as e:
+            self.logger.error(f"Error writing regime metrics for symbol {symbol}: {str(e)}")
+            raise
+
+    async def get_latest_regime_metrics(self, symbol: str, interval: str):
+        if not self.read_pool:
+            await self.initialize()
+
+        try:
+            async with self.read_pool.acquire() as conn:
+                query = """
+                SELECT * FROM regime_metrics
+                WHERE symbol = $1 AND interval = $2
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+                row = await conn.fetchrow(query, symbol, interval)
+                return dict(row) if row else None
+
+        except Exception as e:
+            self.logger.error(f"Error reading regime metrics for {symbol}: {str(e)}")
+            return None
+

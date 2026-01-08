@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 from app.exchange.BinanceConnector import BinanceConnector
 from app.services.monitoring_service import MonitoringSystem
+from app.db.redis_handler import RedisHandler
 
 
 @dataclass
@@ -16,9 +17,11 @@ class WebSocketListenerConfig:
 
 class WebSocketListenerService:
     def __init__(self, asset: str, write_queue: asyncio.Queue, monitor: MonitoringSystem,
-                 config: Optional[WebSocketListenerConfig] = None):
+                 config: Optional[WebSocketListenerConfig] = None,
+                 bar_close_queue: Optional[asyncio.Queue] = None):
         self.asset = asset
         self.write_queue = write_queue
+        self.bar_close_queue = bar_close_queue
         self.monitor = monitor
         self.config = WebSocketListenerConfig() if config is None else config
         self.logger = logging.getLogger(self.config.logger_name)
@@ -140,22 +143,40 @@ class WebSocketListenerService:
             if "k" in data:
                 kline = data["k"]
                 
-                message = {
-                    'symbol': self.asset,
-                    'candle': {
-                        'timestamp': kline.get("t"),
-                        'close': float(kline.get("c")),
-                        'volume': float(kline.get("v")),
-                        'open': float(kline.get("o")),
-                        'high': float(kline.get("h")),
-                        'low': float(kline.get("l")),
-                        'trades': kline.get("n"),
-                        'interval': kline.get("i"),
-                        'is_closed': kline.get("x", False)
-                    }
+                candle_data = {
+                    'timestamp': kline.get("t"),
+                    'close': float(kline.get("c")),
+                    'volume': float(kline.get("v")),
+                    'open': float(kline.get("o")),
+                    'high': float(kline.get("h")),
+                    'low': float(kline.get("l")),
+                    'trades': kline.get("n"),
+                    'interval': kline.get("i"),
+                    'is_closed': kline.get("x", False)
                 }
 
+                message = {
+                    'symbol': self.asset,
+                    'candle': candle_data
+                }
+
+                # Cache latest candle in Redis for real-time frontend
+                # We cache it even if not closed, so frontend sees live price
+                await RedisHandler().cache_market_data(
+                    symbol=self.asset,
+                    timeframe=self.config.interval,
+                    data=candle_data
+                )
+
                 await self.write_queue.put(message)
+
+                # Push to bar_close_queue if candle is closed and queue is available
+                if self.bar_close_queue and candle_data.get('is_closed', False):
+                    await self.bar_close_queue.put({
+                        'asset': self.asset,
+                        'candle': candle_data,
+                        'interval': self.config.interval
+                    })
 
         except Exception as e:
             self.logger.error(f"Error processing message for {self.asset}: {e}", exc_info=True)

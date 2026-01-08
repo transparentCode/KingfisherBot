@@ -23,16 +23,17 @@ FROM python:3.10.17-slim
 WORKDIR /app
 
 COPY --from=builder /usr/lib/libta_lib.* /usr/lib/
+COPY --from=builder /usr/include/ta-lib /usr/include/ta-lib
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libffi-dev && \
+    apt-get install -y --no-install-recommends libffi-dev gcc g++ make libexpat1 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml poetry.lock* ./
 
 RUN pip install --no-cache-dir poetry && \
     poetry config virtualenvs.create false && \
-    poetry install --no-root --no-interaction --no-dev  # Add --no-dev for production
+    poetry install --no-root --no-interaction
 
 COPY . .
 

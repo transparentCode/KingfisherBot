@@ -1,0 +1,334 @@
+:root {
+  --bg: #0e1013;
+  --panel: #15181e;
+  --panel-2: #1b1f26;
+  --border: #252a33;
+  --text: #e8eef7;
+  --muted: #9aa4b5;
+  --accent: #4cc9f0;
+  --accent-2: #f4a261;
+  --danger: #ef476f;
+  --success: #4caf50;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+
+  font-family: 'Inter Tight', 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent);
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: transparent; /* Allow Lottie to show through */
+  position: relative; /* Create stacking context for absolute children */
+}
+
+.navbar {
+  background: rgba(21, 24, 30, 0.7); /* Semi-transparent */
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  z-index: 10;
+}
+
+.navbar nav {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.user-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  min-width: 150px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.dot.live {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+.section {
+  background: rgba(27, 31, 38, 0.7); /* Semi-transparent panel-2 */
+  backdrop-filter: blur(5px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.eyebrow {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.muted {
+  color: var(--muted);
+  margin: 0;
+}
+
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.nav-btn,
+.ghost,
+.primary,
+button {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 10px 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.nav-btn.active {
+  background: var(--accent);
+  color: #0a0a0a;
+  border-color: var(--accent);
+}
+
+.nav-btn:hover,
+.ghost:hover,
+.primary:hover,
+button:hover {
+  border-color: var(--accent);
+}
+
+.primary {
+  background: var(--accent);
+  color: #0a0a0a;
+  border-color: var(--accent);
+}
+
+.ghost {
+  background: transparent;
+}
+
+.content {
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.top-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: rgba(21, 24, 30, 0.7); /* Semi-transparent panel */
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.chart-card {
+  grid-column: 1 / -1;
+  min-height: 520px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(76, 201, 240, 0.15);
+  color: var(--accent);
+  font-weight: 600;
+  border: 1px solid rgba(76, 201, 240, 0.4);
+}
+
+.chip.warning {
+  background: rgba(244, 162, 97, 0.15);
+  color: var(--accent-2);
+  border-color: rgba(244, 162, 97, 0.4);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.metric {
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.metric h4 {
+  margin: 4px 0;
+}
+
+.log-panel {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.log-row {
+  font-family: 'Berkeley Mono', 'SFMono-Regular', ui-monospace, Menlo, monospace;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.log-row.info { border-left: 3px solid var(--accent); }
+.log-row.warn { border-left: 3px solid var(--accent-2); }
+.log-row.err { border-left: 3px solid var(--danger); }
+
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at 20% 20%, rgba(76, 201, 240, 0.08), transparent 35%),
+    radial-gradient(circle at 80% 10%, rgba(244, 162, 97, 0.08), transparent 30%),
+    var(--bg);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: var(--shadow);
+}
+
+.auth-card h1 {
+  margin: 6px 0 4px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 600;
+}
+
+input {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+input:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.error-chip {
+  background: rgba(239, 71, 111, 0.12);
+  border: 1px solid rgba(239, 71, 111, 0.5);
+  color: #ffb3c7;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+  .rail {
+    flex-direction: row;
+    gap: 12px;
+    overflow-x: auto;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  .chart-card {
+    grid-column: auto;
+  }
+}

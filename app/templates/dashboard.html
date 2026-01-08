@@ -266,13 +266,14 @@
                                     <span class="input-group-text"><i class="fas fa-search"></i></span>
                                     <input type="text" class="form-control" id="symbol-search" placeholder="Search symbol...">
                                 </div>
-                                <select class="form-select form-select-sm" id="active-symbol">
-                                    <option value="BTCUSDT" selected>BTC/USDT</option>
-                                    <option value="ETHUSDT">ETH/USDT</option>
-                                    <option value="BNBUSDT">BNB/USDT</option>
-                                    <option value="ADAUSDT">ADA/USDT</option>
-                                    <option value="SOLUSDT">SOL/USDT</option>
-                                </select>
+                                <div class="d-flex align-items-center gap-2">
+                                    <select class="form-select form-select-sm" id="active-symbol">
+                                        <option value="" disabled selected>Loading assets...</option>
+                                    </select>
+                                    <span id="asset-status-badge" class="badge bg-secondary" title="Asset Status">
+                                        <i class="fas fa-circle-notch fa-spin"></i>
+                                    </span>
+                                </div>
                             </div>
 
                             <!-- Timeframe Selection -->

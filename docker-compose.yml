@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   kingfisher-network:
     driver: bridge
@@ -33,6 +31,22 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - kingfisher-network
+
+  frontend:
+    build: ./frontend
+    container_name: kingfisher_frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - BACKEND_URL=http://kingfisherbot:8080
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+    depends_on:
+      - kingfisherbot
     networks:
       - kingfisher-network
 

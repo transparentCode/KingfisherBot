@@ -67,7 +67,14 @@ class MTFDataManager:
         try:
             # Calculate lookback time
             end_time = datetime.now()
-            start_time = end_time - timedelta(hours=self.lookback_hours)
+            
+            # Dynamic lookback: Ensure we have at least 200 bars for the requested timeframe
+            # or use the default lookback_hours, whichever is larger.
+            required_minutes = self.timeframe_minutes.get(timeframe, 1) * 200
+            required_hours = required_minutes / 60
+            effective_lookback = max(self.lookback_hours, required_hours)
+            
+            start_time = end_time - timedelta(hours=effective_lookback)
 
             # Get DB interval format
             db_interval = self.timeframe_to_db_interval.get(timeframe, timeframe)
@@ -96,6 +103,9 @@ class MTFDataManager:
             # Convert timestamp to datetime and set as index
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
+            
+            # Sort index to ensure chronological order (critical for indicators)
+            df.sort_index(inplace=True)
 
             # Convert price columns to float
             price_columns = ['open', 'high', 'low', 'close', 'volume']
@@ -137,7 +147,7 @@ class MTFDataManager:
                 rule = f"{to_minutes}T"
 
             # Resample OHLCV data
-            resampled = df.resample(rule).agg({
+            resampled = df.resample(rule, label='left', closed='left').agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',

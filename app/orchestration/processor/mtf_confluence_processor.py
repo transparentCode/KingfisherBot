@@ -1,3 +1,7 @@
+"""
+DEPRECATED: This processor is no longer used in the main pipeline. 
+Signal aggregation logic has been moved to BotBrainProcessor and TelegramNotificationProcessor.
+"""
 import logging
 import traceback
 from typing import Dict, Any, List, Optional
@@ -61,7 +65,7 @@ class SignalAggregationProcessor:
             telegram_config = self.config_manager.global_config.get('telegram_notifications', {})
             # Ensure defaults exist
             return {
-                'enabled': telegram_config.get('enabled', False),
+                'enabled': telegram_config.get('enabled', True),
                 'timeframes_to_monitor': telegram_config.get('timeframes_to_monitor', ['15m', '30m', '1h', '4h']),
                 'save_charts': telegram_config.get('save_charts', True),
                 'charts_dir': telegram_config.get('charts_dir', './charts'),
@@ -119,6 +123,7 @@ class SignalAggregationProcessor:
             signals = {
                 'trendline_signals': self._extract_trendline_signals(all_results),
                 'ma_signals': self._extract_ma_signals(all_results),
+                'oscillator_signals': self._extract_oscillator_signals(all_results),
                 'confluence_signals': self._analyze_enhanced_ma_confluence(all_results),
                 'price_action': self._analyze_price_action(all_results),
                 'mtf_analysis': mtf_analysis
@@ -129,8 +134,18 @@ class SignalAggregationProcessor:
             
             # Store locally
             self.aggregated_signals[asset] = composite_signals
+
+            # Store in Redis for API access
+            try:
+                if self.redis_handler:
+                    import json
+                    await self.redis_handler.redis_client.set(
+                        f"signals:{asset}:latest", 
+                        json.dumps(composite_signals, default=str)
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to cache signals to Redis: {e}")
             
-            # --- CRITICAL FIX: Trigger Telegram Notification ---
             if composite_signals and self.telegram_processor:
                 self.logger.info(f"Sending {len(composite_signals)} signals to Telegram processor")
                 # Assuming process_signals is async
@@ -146,6 +161,25 @@ class SignalAggregationProcessor:
             self.logger.error(f"Error in enhanced signal aggregation for {asset}: {e}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             self.aggregated_signals[asset] = []
+
+    def _analyze_enhanced_ma_confluence(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze enhanced MA confluence across all timeframes"""
+        confluence_signals = {}
+        
+        # Group results by timeframe
+        timeframe_results = self._group_results_by_timeframe(all_results)
+        
+        for timeframe, tf_results in timeframe_results.items():
+            # Get current price for this timeframe
+            current_price = self._get_current_price(tf_results)
+            
+            if current_price is not None:
+                confluence_result = self._check_enhanced_ma_confluence(tf_results, current_price)
+                # Only add if there is a signal or a significant confluence line
+                if confluence_result.get('signal') or (confluence_result.get('confluence_line') and confluence_result.get('line_analysis', {}).get('significant')):
+                    confluence_signals[timeframe] = confluence_result
+                    
+        return confluence_signals
 
     def _check_enhanced_ma_confluence(self, tf_results: Dict, current_price: float) -> Dict:
         """Enhanced MA confluence check with explicit confluence line"""
@@ -192,8 +226,6 @@ class SignalAggregationProcessor:
         
         return enhanced_result
 
-    # ... (Keep _create_enhanced_composite_signals, _evaluate_enhanced_timeframe_confluence, _extract_trendline_signals as is) ...
-
     def _extract_ma_signals(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Extract MA signals and price vs MA analysis"""
         ma_signals = {'above_ma': [], 'below_ma': [], 'current_price': None}
@@ -231,6 +263,7 @@ class SignalAggregationProcessor:
                     if ma_value is not None:
                         signal_data = {
                             'timeframe': timeframe,
+                            'period': metadata.get('params').get('period') if metadata.get('params') else None,
                             'indicator': indicator_id,
                             'ma_value': float(ma_value),
                             'price': current_price
@@ -244,6 +277,63 @@ class SignalAggregationProcessor:
         
         return ma_signals
 
+    def _extract_oscillator_signals(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract Oscillator signals (RSI, etc.)"""
+        oscillator_signals = {
+            'overbought': [], 
+            'oversold': [], 
+            'bullish_divergence': [], 
+            'bearish_divergence': []
+        }
+        
+        for result_key, result_data in results.items():
+            try:
+                metadata = result_data.get('metadata', {})
+                if not isinstance(metadata, dict): continue
+                
+                # Check category or type
+                if metadata.get('category') != 'Oscillators' and metadata.get('type') != 'Oscillator':
+                    continue
+                
+                indicator_id = metadata.get('indicator_id')
+                timeframe = metadata.get('timeframe', 'unknown')
+                
+                # 1. Overbought/Oversold
+                ob_os = metadata.get('overbought_oversold', {})
+                if ob_os.get('overbought'):
+                    oscillator_signals['overbought'].append({
+                        'timeframe': timeframe,
+                        'indicator': indicator_id,
+                        'value': ob_os.get('reading')
+                    })
+                elif ob_os.get('oversold'):
+                    oscillator_signals['oversold'].append({
+                        'timeframe': timeframe,
+                        'indicator': indicator_id,
+                        'value': ob_os.get('reading')
+                    })
+                
+                # 2. Divergence (from metadata)
+                divergence = metadata.get('divergence', {})
+                if divergence.get('has_new_divergence'):
+                    div_type = divergence.get('divergence_type')
+                    signal_data = {
+                        'timeframe': timeframe,
+                        'indicator': indicator_id,
+                        'strength': divergence.get('signal_strength', 1),
+                        'type': div_type
+                    }
+                    
+                    if div_type == 'bullish':
+                        oscillator_signals['bullish_divergence'].append(signal_data)
+                    elif div_type == 'bearish':
+                        oscillator_signals['bearish_divergence'].append(signal_data)
+                        
+            except Exception:
+                continue
+                
+        return oscillator_signals
+
     def _analyze_ema_direction_agreement(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze EMA direction agreement across timeframes"""
         timeframe_directions = {}
@@ -251,8 +341,12 @@ class SignalAggregationProcessor:
         # Group by timeframes (ordered by priority)
         ordered_timeframes = ['1d', '4h', '1h', '30m', '15m', '5m']
         
+        # Use helper to group by metadata instead of key suffix
+        grouped_results = self._group_results_by_timeframe(all_results)
+        
         for timeframe in ordered_timeframes:
-            tf_results = {k: v for k, v in all_results.items() if k.endswith(f'_{timeframe}')}
+            # tf_results = {k: v for k, v in all_results.items() if k.endswith(f'_{timeframe}')}
+            tf_results = grouped_results.get(timeframe, {})
             
             if tf_results:
                 direction_data = self._calculate_tf_ema_direction(tf_results, timeframe)
@@ -363,8 +457,9 @@ class SignalAggregationProcessor:
         composite_signals = []
         
         # Extract timeframes with validation
+        self.logger.info(f"Extracting timeframes for composite signal creation for {asset} with {signals}) ")
         timeframes = set()
-        for category_signals in [signals['trendline_signals'], signals['ma_signals'], signals['confluence_signals']]:
+        for category_signals in [signals['trendline_signals'], signals['ma_signals'], signals['oscillator_signals'], signals['confluence_signals']]:
             if isinstance(category_signals, dict):
                 for sub_signals in category_signals.values():
                     if isinstance(sub_signals, list):
@@ -413,6 +508,46 @@ class SignalAggregationProcessor:
             signal_details.extend(tl_bearish)
             direction = 'bearish'
         
+        # Check Oscillator signals
+        osc_signals = signals.get('oscillator_signals', {})
+        
+        # Divergences (Strong signals)
+        bull_div = [s for s in osc_signals.get('bullish_divergence', []) if s['timeframe'] == timeframe]
+        bear_div = [s for s in osc_signals.get('bearish_divergence', []) if s['timeframe'] == timeframe]
+        
+        if bull_div:
+            score += 3 * len(bull_div)
+            signal_details.extend(bull_div)
+            if not direction: direction = 'bullish'
+            elif direction == 'bearish': score -= 2 # Conflict
+            
+        if bear_div:
+            score += 3 * len(bear_div)
+            signal_details.extend(bear_div)
+            if not direction: direction = 'bearish'
+            elif direction == 'bullish': score -= 2 # Conflict
+
+        # Overbought/Oversold (Reversal potential)
+        # If we have a bullish signal (e.g. trendline break) AND oversold -> Stronger
+        # If we have a bearish signal AND overbought -> Stronger
+        
+        is_oversold = any(s['timeframe'] == timeframe for s in osc_signals.get('oversold', []))
+        is_overbought = any(s['timeframe'] == timeframe for s in osc_signals.get('overbought', []))
+        
+        if is_oversold:
+            if direction == 'bullish':
+                score += 2 # Confluence: Bullish signal + Oversold
+                signal_details.append({'type': 'oversold_confluence', 'timeframe': timeframe})
+            elif direction == 'bearish':
+                score -= 1 # Caution: Selling into oversold
+                
+        if is_overbought:
+            if direction == 'bearish':
+                score += 2 # Confluence: Bearish signal + Overbought
+                signal_details.append({'type': 'overbought_confluence', 'timeframe': timeframe})
+            elif direction == 'bullish':
+                score -= 1 # Caution: Buying into overbought
+
         # Enhanced confluence signals analysis
         confluence_signals = signals.get('confluence_signals', {})
         if timeframe in confluence_signals:
