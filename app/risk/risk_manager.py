@@ -2,6 +2,7 @@ import logging
 import numpy as np
 from typing import Dict, Optional, List
 from app.risk.models import RiskProfile, TradePlan, TradingStyle, StopLossType, TakeProfitType, AssetRiskSettings
+from app.execution.coin_clustering import ClusterManager
 
 class RiskManager:
     """
@@ -9,9 +10,10 @@ class RiskManager:
     Calculates Position Sizing, Stop Losses, and Take Profits based on Risk Profiles.
     """
     
-    def __init__(self, config_manager=None):
+    def __init__(self, config_manager=None, cluster_manager: Optional[ClusterManager] = None):
         self.logger = logging.getLogger("app.risk")
         self.config_manager = config_manager
+        self.cluster_manager = cluster_manager
         # Default Profiles (Can be loaded from config)
         self.profiles = {
             TradingStyle.SCALPING: RiskProfile(
@@ -43,6 +45,14 @@ class RiskManager:
     
     def set_default_asset_settings(self, settings: AssetRiskSettings):
         self.default_asset_settings = settings
+
+    def check_cluster_risk(self, symbol: str, current_positions: List[str]) -> bool:
+        """
+        Delegates to ClusterManager to check if adding 'symbol' violates cluster limits.
+        """
+        if self.cluster_manager:
+            return self.cluster_manager.check_risk_allowance(symbol, current_positions)
+        return True # Default to allowed if no cluster manager
 
     def get_profile(self, style: TradingStyle) -> RiskProfile:
         return self.profiles.get(style, self.profiles[TradingStyle.SWING])

@@ -19,7 +19,7 @@
     fc_zigzag_dev: 0.05
   };
 
-  $: if (visible && $assetStore.selectedAsset) {
+  $: if (visible && $assetStore.selectedAsset && $marketStore.startDateTime && $marketStore.endDateTime) {
     fetchRSIData();
   }
 

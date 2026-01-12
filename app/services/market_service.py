@@ -2,6 +2,7 @@ from app.db.redis_handler import RedisHandler
 import asyncio
 import logging
 import os
+import pandas as pd
 from dataclasses import dataclass
 from typing import Optional
 
@@ -27,6 +28,7 @@ from app.db.mtf_data_manager import MTFDataManager
 from app.execution.binance_execution import BinanceExecutionService
 from app.execution.paper_execution import PaperExecutionService
 from app.execution.execution_router import ExecutionRouter
+from app.execution.coin_clustering import ClusterManager
 from app.services.safety_service import SafetyService
 from app.risk.risk_manager import RiskManager
 
@@ -100,17 +102,27 @@ class MarketService:
             self.binance_execution = BinanceExecutionService(self.binance_connector)
             self.paper_execution = PaperExecutionService()
             
-            # 3. Router
+            # 3. Cluster Manager (Correlation Analysis)
+            # Default to BTCUSDT as benchmark, 30 day lookback
+            self.cluster_manager = ClusterManager(
+                benchmark_symbol="BTCUSDT", 
+                lookback_days=30
+            )
+
+            # 4. Router
             self.execution_router = ExecutionRouter(
                 binance_service=self.binance_execution,
                 paper_service=self.paper_execution
             )
             
-            # 4. Safety Service
+            # 5. Safety Service
             self.safety_service = SafetyService(self.execution_router)
             
-            # 5. Risk Manager
-            self.risk_manager = RiskManager(self.config_manager)
+            # 6. Risk Manager
+            self.risk_manager = RiskManager(
+                config_manager=self.config_manager,
+                cluster_manager=self.cluster_manager
+            )
             
             self.logger.info("Execution and Risk services initialized successfully.")
             
@@ -245,6 +257,56 @@ class MarketService:
             self.asset_states[asset] = AssetStatus.ERROR.value
             self.logger.error(f"Failed to initialize asset {asset}: {e}")
 
+    async def _run_cluster_update_loop(self):
+        """
+        Background task to update risk clusters periodically (e.g., hourly).
+        """
+        self.logger.info("Starting Cluster Update Loop...")
+        # Initial delay to let DB fill up if starting fresh
+        await asyncio.sleep(60) 
+        
+        while self.running:
+            try:
+                self.logger.info("Updating Risk Clusters...")
+                start_time = time.time()
+                
+                # 1. Fetch Data for all assets (Parallel)
+                tasks = []
+                for asset in self.assets:
+                    # Fetch just 1h timeframe
+                    tasks.append(self.mtf_data_manager.get_mtf_data(asset, ['1h']))
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # 2. Process Results
+                dfs = []
+                for asset, res in zip(self.assets, results):
+                    if isinstance(res, Exception):
+                        continue
+                    
+                    df_1h = res.get('1h')
+                    if df_1h is not None and not df_1h.empty:
+                        # Resample to ensure hourly alignment (fill missing with ffill)
+                        s = df_1h['close'].rename(asset)
+                        dfs.append(s)
+                
+                if len(dfs) > 5: # Need minimum assets to cluster
+                    price_df = pd.concat(dfs, axis=1)
+                    
+                    # 3. Update Clusters
+                    self.cluster_manager.update_clusters(price_df, method='spearman')
+                    
+                    elapsed = time.time() - start_time
+                    self.logger.info(f"Risk Clusters Updated in {elapsed:.2f}s")
+                else:
+                    self.logger.warning("Cluster Update: Insufficient data (need > 5 assets).")
+
+            except Exception as e:
+                self.logger.error(f"Error in Cluster Update Loop: {e}")
+            
+            # Sleep for 1 hour
+            await asyncio.sleep(3600)
+
     async def start(self):
         """
         Start all its subcomponents.
@@ -285,6 +347,9 @@ class MarketService:
         )
         # Start as a background task
         asyncio.create_task(self.cleanup_service.start())
+
+        # Start Risk Cluster Update Loop
+        asyncio.create_task(self._run_cluster_update_loop())
 
         # Start components
         for i in range(self.db_worker_count):

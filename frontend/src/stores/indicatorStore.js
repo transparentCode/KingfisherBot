@@ -50,6 +50,7 @@ function createIndicatorStore() {
             loading: false,
             data: null,
             tvlcData: null,
+            lastQueryKey: null,
             error: null
         })),
         loading: false,
@@ -80,10 +81,10 @@ function createIndicatorStore() {
             const currentState = get(indicatorStore);
             const targetIndicator = currentState.availableIndicators.find(i => i.id === indicatorId);
 
-            if (targetIndicator && targetIndicator.visible && !targetIndicator.tvlcData) {
-                // Fetch data
-                await indicatorStore.fetchIndicatorData(indicatorId);
-            }
+            // When toggled ON, always fetch fresh data so the chart reliably restores the overlay.
+            if (!targetIndicator || !targetIndicator.visible) return;
+            if (targetIndicator.loading) return;
+            await indicatorStore.fetchIndicatorData(indicatorId);
         },
 
         fetchIndicatorData: async (indicatorId) => {
@@ -117,7 +118,9 @@ function createIndicatorStore() {
                 if (startDateTime) queryParams.set('startDateTime', startDateTime);
                 if (endDateTime) queryParams.set('endDateTime', endDateTime);
 
-                const res = await fetch(`${indicator.route}?${queryParams}`);
+                const queryKey = `${indicator.route}?${queryParams.toString()}`;
+
+                const res = await fetch(queryKey);
                 const data = await res.json();
 
                 if (data.success) {
@@ -127,7 +130,8 @@ function createIndicatorStore() {
                             i.id === indicatorId ? { 
                                 ...i, 
                                 loading: false, 
-                                tvlcData: data.tvlc_data 
+                                tvlcData: data.tvlc_data,
+                                lastQueryKey: queryKey
                             } : i
                         )
                     }));

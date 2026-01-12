@@ -1,62 +1,70 @@
 # KingfisherBot Copilot Instructions
 
 ## Project Overview
-KingfisherBot is a Python-based crypto trading and analysis bot. It uses a modular architecture to manage market data, calculate technical indicators, and execute trading strategies. The system is built on **Flask** (web/API), **TimescaleDB** (historical data), and **Redis** (real-time state).
+KingfisherBot is a Python-based crypto trading system with a modular architecture for market analysis, signal generation, and automated execution. It features a Svelte-based frontend for real-time monitoring and is designed for scalability with TimescaleDB and Redis.
 
-## Architecture & Core Components
+## 🏗 System Architecture
 
-### 1. Service Layer (`app/services/`)
-- **MarketService (`market_service.py`):** The central orchestrator. It runs in a background thread (started in `run.py`), managing data ingestion, pipeline execution, and persistence.
-- **IndicatorRegistry (`indicator_registers.py`):** Singleton registry for all technical indicators. New indicators *must* be registered here to be usable via config.
-- **ConfigurationManager (`config/asset_indicator_config.py`):** Singleton that manages asset-specific configurations and runtime overrides.
+### 1. Core Services (`app/services/`)
+- **MarketService (`market_service.py`)**: The central hub. Manages `WebSocketListenerService` (data ingestion), `IndicatorCalcService` (computation), and `ExecutionRouter`.
+- **BotBrain (`app/brain/bot_brain.py`)**: The decision engine.
+  - **FeatureExtractor**: Retrieves/computes market states (Regimes) and tactical indicators.
+  - **MTFConfluenceEngine**: Analyzes cross-timeframe alignment.
+  - **Logic**: Implements high-level "Playbooks" (e.g., `TREND_PULLBACK`, `MEAN_REVERSION`).
+- **Orchestration (`app/orchestration/`)**:
+  - `IndicatorPipeline`: Runs a sequence of **Orchestrators** (e.g., `TAOrchestrator`, `RegimeOrchestrator`).
+  - Decouples calculation scheduling from business logic.
 
-### 2. Domain Logic
-- **Indicators (`app/indicators/`):**
-  - Must inherit from `BaseIndicatorInterface`.
-  - Must implement `calculate(data: pd.DataFrame) -> pd.DataFrame` (usually appends columns).
-  - Must implement `plot(data: pd.DataFrame)`.
-  - **Pattern:** Use `app.utils.price_utils.get_price_source_data` to handle flexible input columns (open/high/low/close).
-- **Strategies (`app/strategy/`):**
-  - Must inherit from `BaseStrategyInterface`.
-  - Must implement `initialize`, `execute`, and `plot`.
-  - `execute` returns a DataFrame with signals.
+### 2. Execution & Risk (`app/execution/`, `app/risk/`)
+- **ExecutionRouter**: Routes orders to `BinanceExecutionService` (live) or `PaperExecutionService` (sim).
+- **CoinClustering**: Manages asset correlation to prevent concentrated risk.
+- **RiskManager**: Handles position sizing and safety checks.
 
-### 3. Data & Infrastructure
-- **Database:** TimescaleDB (Postgres) for candle storage. Handled by `app/db/db_handler.py`.
-- **Cache/State:** Redis for real-time data and inter-service communication. Handled by `app/db/redis_handler.py`.
-- **Web:** Flask blueprints in `app/routes/`. SocketIO for real-time frontend updates.
+### 3. Data Flow
+1.  **Ingestion**: `BinanceConnector` -> `Redis` (Hot path) & `TimescaleDB` (Cold storage).
+2.  **Processing**: `MarketService` triggers `IndicatorPipeline` on new candles/schedules.
+3.  **Broadcasting**: `LiveDataManager` (`app/routes/websocket_routes.py`) pushes updates to Frontend via SocketIO.
 
-## Developer Workflows
+### 4. Frontend (`frontend/`)
+- **Stack**: Svelte + Vite.
+- **Communication**: WebSockets (SocketIO) for real-time candle/signal data.
+- **Status**: Visualizes "Regimes", "Signals", and active "Trades".
+
+## 🛠 Developer Workflows
+
+### Environment Setup
+- **Python**: Requires `poetry`. Note specific constraints: `pandas==1.5.3`, `numpy<1.24` (for `vectorbt`).
+- **Run**: `python run.py` (Starts Flask + MarketService).
+- **Docker**: `docker-compose up` (Includes Redis, TimescaleDB, App, Frontend).
 
 ### Adding a New Indicator
-1.  **Create Class:** Add a new file in `app/indicators/` (e.g., `my_indicator.py`).
-2.  **Inherit:** Subclass `BaseIndicatorInterface`.
-3.  **Implement:** Define `calculate` (using VectorBT or TA-Lib where possible) and `plot`.
-4.  **Register:** Add the indicator to `IndicatorRegistry.register_default_indicators` in `run.py` or `app/services/indicator_registers.py`.
+1.  **Implements**: Create class in `app/indicators/`, inheriting `BaseIndicatorInterface`.
+2.  **Register**: Add to `IndicatorRegistry` in `app/services/indicator_registers.py`.
+3.  **Config**: Enable in `assets_config.yaml` to be picked up by `TAOrchestrator`.
 
-### Running the Project
-- **Docker (Recommended):**
-  ```bash
-  docker-compose up --build
-  ```
-  *Note: The Dockerfile compiles TA-Lib from source, which can take time.*
-- **Local Development:**
-  - Requires `poetry` and system-level `ta-lib` installed.
-  - Run: `python run.py`
+### Backend <-> Frontend Integration
+- **Backend emits**: `socketio.emit('candle_update', ...)` in `app/routes/websocket_routes.py`.
+- **Frontend subscribes**: Svelte stores/components listen to SocketIO events.
 
-### Configuration
-- **Global Config:** `config/configs.py` (Flask settings).
-- **Asset Config:** `assets_config.yaml` (defines which indicators run for which assets).
-- **Environment:** `.env` file for secrets (API keys, DB URLs).
+## ⚠️ Conventions & Patterns
 
-## Coding Conventions
-- **DataFrames:** `pandas` is the primary data structure. Ensure index is DatetimeIndex for time-series operations.
-- **Async/Sync:** The web layer (Flask) is synchronous. The core logic (`MarketService`) uses `asyncio`. Be careful when bridging these contexts.
-- **Type Hinting:** Use Python type hints extensively (`typing.List`, `typing.Dict`, `pd.DataFrame`).
-- **Logging:** Use `logging.getLogger("app")`. Do not use `print`.
+- **Async/Sync**:
+    - **Flask Routes**: Synchronous.
+    - **MarketService/IO**: Asynchronous (`asyncio`).
+    - *Caution*: Be careful when calling async code from Flask routes (use `run_coroutine_threadsafe` or similar bridges).
+- **DataFrames**:
+    - Use `pandas` for all time-series data.
+    - **Index**: Must be `DatetimeIndex`.
+    - **VectorBT**: Used for heavy vector calculations (`app/indicators/`).
+- **Configuration**:
+    - `global_config.yaml`: System settings.
+    - `assets_config.yaml`: Per-asset indicator rules (active timeframes, params).
+    - `ConfigurationManager`: Handles hot-reloading of configs.
+- **Logging**: Use `logging.getLogger("app")`. Never use `print()`.
 
-## Key Files
-- `run.py`: Entry point. Starts Flask and MarketService.
-- `app/services/market_service.py`: Core logic loop.
-- `app/indicators/BaseIndicatorInterface.py`: Contract for indicators.
-- `docker-compose.yml`: Infrastructure definition.
+## 📂 Key Directories
+- `app/brain/`: Decision logic (Signals, Confluence).
+- `app/orchestration/`: Pipelines for data processing.
+- `app/indicators/`: Mathematical indicator logic.
+- `app/execution/`: Exchange integration & order routing.
+- `frontend/src/`: Svelte UI source.

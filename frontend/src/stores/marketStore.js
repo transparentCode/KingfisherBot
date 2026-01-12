@@ -1,12 +1,18 @@
 import { writable } from 'svelte/store';
 
 function createMarketStore() {
+    // Abort controllers for network optimization
+    let regimeController = null;
+    let candlesController = null;
+
     const { subscribe, set, update } = writable({
         symbol: 'BTCUSDT',
         timeframe: '1h',
         candles: [],
         tvlcData: { candles: [], lines: [], markers: [], histograms: [] },
+        regime: null,
         loading: false,
+        regimeLoading: false,
         error: null,
         lastUpdated: null,
         startDateTime: null,
@@ -16,7 +22,34 @@ function createMarketStore() {
     return {
         subscribe,
         
+        fetchRegime: async (symbol, timeframe) => {
+            if (regimeController) regimeController.abort();
+            regimeController = new AbortController();
+
+            update(s => ({ ...s, regimeLoading: true }));
+            try {
+                const response = await fetch(`/api/asset/regime/${symbol}?timeframe=${timeframe}`, {
+                    signal: regimeController.signal
+                });
+                const data = await response.json();
+                if (data.success) {
+                    update(s => ({ ...s, regime: data.data, regimeLoading: false }));
+                } else {
+                    console.warn("Regime fetch failed:", data.error);
+                    update(s => ({ ...s, regime: null, regimeLoading: false }));
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') return; // Ignore aborted requests
+                console.error("Failed to fetch regime:", e);
+                update(s => ({ ...s, regime: null, regimeLoading: false }));
+            }
+        },
+
         fetchCandles: async (symbol, timeframe = '1h', startDateTime, endDateTime) => {
+            // Cancel previous pending request
+            if (candlesController) candlesController.abort();
+            candlesController = new AbortController();
+
             // Default range: last 30 days ending now
             const end = endDateTime ? new Date(endDateTime) : new Date();
             const start = startDateTime ? new Date(startDateTime) : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -37,7 +70,9 @@ function createMarketStore() {
                         endDateTime: endISO
                     });
 
-                    const response = await fetch(`/api/candle-data/${symbol}?${params.toString()}`);
+                    const response = await fetch(`/api/asset/candle-data/${symbol}?${params.toString()}`, {
+                        signal: candlesController.signal
+                    });
                     const text = await response.text();
 
                     if (!text || text.trim() === '') throw new Error('Empty response');
@@ -58,6 +93,8 @@ function createMarketStore() {
                         throw new Error(data.error);
                     }
                 } catch (netError) {
+                    if (netError.name === 'AbortError') throw netError; // Re-throw cancel
+                    
                     if (isDev) {
                         console.warn(`Backend unreachable, using mock candles for ${symbol}`);
                         // Generate mock candles
@@ -102,6 +139,7 @@ function createMarketStore() {
                     lastUpdated: new Date()
                 }));
             } catch (e) {
+                if (e.name === 'AbortError') return; // Ignore aborted requests
                 console.error("Failed to fetch candles:", e);
                 update(s => ({ ...s, error: e.message, loading: false }));
             }

@@ -58,6 +58,29 @@ class DBHandler:
                         max_size=10,
                         timeout=60,
                     )
+                    
+                    # Ensure SR table exists
+                    async with self.write_pool.acquire() as conn:
+                        await conn.execute("""
+                            CREATE TABLE IF NOT EXISTS sr_levels (
+                                level_id VARCHAR(50) PRIMARY KEY,
+                                symbol VARCHAR(20) NOT NULL,
+                                timeframe VARCHAR(10) NOT NULL,
+                                level_type VARCHAR(20),
+                                center FLOAT,
+                                upper_bound FLOAT,
+                                lower_bound FLOAT,
+                                strength FLOAT,
+                                status VARCHAR(20),
+                                touch_count INT,
+                                formation_time TIMESTAMP WITH TIME ZONE,
+                                last_touch_time TIMESTAMP WITH TIME ZONE,
+                                extra_data JSONB,
+                                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_sr_levels_lookup 
+                            ON sr_levels(symbol, timeframe, status);
+                        """)
 
                     self.logger.info("Database connection pool created.")
                 except Exception as e:
@@ -408,3 +431,107 @@ class DBHandler:
             self.logger.error(f"Error reading regime metrics for {symbol}: {str(e)}")
             return None
 
+
+    async def write_sr_levels(self, symbol: str, timeframe: str, levels: List[Dict[str, Any]]):
+        if not self.write_pool:
+            await self.initialize()
+
+        import json
+        
+        # level_id, symbol, timeframe, level_type, center, upper_bound, lower_bound, strength, status, touch_count, formation_time, last_touch_time, extra_data
+        query = """
+            INSERT INTO sr_levels (
+                level_id, symbol, timeframe, level_type, center, upper_bound, lower_bound, 
+                strength, status, touch_count, formation_time, last_touch_time, extra_data
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (level_id) DO UPDATE SET
+                center = EXCLUDED.center,
+                upper_bound = EXCLUDED.upper_bound,
+                lower_bound = EXCLUDED.lower_bound,
+                strength = EXCLUDED.strength,
+                status = EXCLUDED.status,
+                touch_count = EXCLUDED.touch_count,
+                last_touch_time = EXCLUDED.last_touch_time,
+                extra_data = EXCLUDED.extra_data,
+                updated_at = NOW()
+        """
+        
+        try:
+            async with self.write_pool.acquire() as conn:
+                async with conn.transaction():
+                    for lvl in levels:
+                        # Prepare extra_data (exclude known columns)
+                        known_cols = {
+                            'level_id', 'type', 'center', 'upper_bound', 'lower_bound', 
+                            'strength', 'status', 'touch_count', 'formation_time', 'last_touch_time'
+                        }
+                        extra = {k: v for k, v in lvl.items() if k not in known_cols}
+                        
+                        # Parse timestamps
+                        formation_time = lvl.get('formation_time')
+                        if isinstance(formation_time, str):
+                            formation_time = datetime.datetime.fromisoformat(formation_time)
+                            
+                        last_touch = lvl.get('last_touch_time')
+                        if isinstance(last_touch, str) and last_touch:
+                            last_touch = datetime.datetime.fromisoformat(last_touch)
+                        elif not last_touch:
+                            last_touch = None
+
+                        await conn.execute(query,
+                            lvl['level_id'],
+                            symbol,
+                            timeframe,
+                            lvl.get('type', 'SUPPORT'),
+                            lvl['center'],
+                            lvl['upper_bound'],
+                            lvl['lower_bound'],
+                            lvl['strength'],
+                            lvl['status'],
+                            lvl['touch_count'],
+                            formation_time,
+                            last_touch,
+                            json.dumps(extra)
+                        )
+            self.logger.debug(f"Wrote {len(levels)} SR levels for {symbol} {timeframe}")
+        except Exception as e:
+            self.logger.error(f"Error writing SR levels for {symbol}: {str(e)}")
+
+    async def get_active_sr_levels(self, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+        if not self.read_pool:
+            await self.initialize()
+
+        try:
+            async with self.read_pool.acquire() as conn:
+                query = """
+                    SELECT * FROM sr_levels 
+                    WHERE symbol = $1 AND timeframe = $2 AND status = 'ACTIVE'
+                """
+                rows = await conn.fetch(query, symbol, timeframe)
+                
+                results = []
+                for row in rows:
+                    r = dict(row)
+                    # Remap DB columns to SRLevel dict format
+                    import json
+                    extra = json.loads(r['extra_data']) if r.get('extra_data') else {}
+                    
+                    obj = {
+                        'level_id': r['level_id'],
+                        'type': r['level_type'], # DB uses level_type, object uses type
+                        'center': r['center'],
+                        'upper_bound': r['upper_bound'],
+                        'lower_bound': r['lower_bound'],
+                        'strength': r['strength'],
+                        'status': r['status'],
+                        'touch_count': r['touch_count'],
+                        'formation_time': r['formation_time'].isoformat() if r['formation_time'] else None,
+                        'last_touch_time': r['last_touch_time'].isoformat() if r['last_touch_time'] else None,
+                        **extra
+                    }
+                    results.append(obj)
+                return results
+
+        except Exception as e:
+            self.logger.error(f"Error reading SR levels for {symbol}: {str(e)}")
+            return []

@@ -67,11 +67,11 @@ class BinanceConnector:
             df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
 
             # Use DateTimeUtils safely
-            try:
-                df['open_time'] = df['open_time'].apply(lambda x: DateTimeUtils.convert_to_ist(x))
-            except Exception:
-                # Fallback if DateTimeUtils fails or isn't imported correctly
-                pass
+            # try:
+            #     df['open_time'] = df['open_time'].apply(lambda x: DateTimeUtils.convert_to_ist(x))
+            # except Exception:
+            #     # Fallback if DateTimeUtils fails or isn't imported correctly
+            #     pass
 
             df.set_index('open_time', inplace=True)
             return df

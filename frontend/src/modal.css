@@ -14,15 +14,15 @@
 }
 
 .modal-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--surface-2);
+  /* border: 1px solid var(--border); Removed in favor of elevation */
   border-radius: 16px;
   width: 90%;
   max-width: 800px;
   max-height: 90vh;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow);
+  box-shadow: 0 24px 48px rgba(0,0,0,0.5); /* Deep shadow for modal */
 }
 
 .modal-card header {

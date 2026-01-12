@@ -11,6 +11,7 @@
   let cpuData = { main: [] };
   let msgRateData = { main: [] };
   let queueData = { main: [], lines: [] }; // main=write, lines=[calc]
+  let assetHealth = null;
 
   const fetchStatus = async () => {
     try {
@@ -23,14 +24,25 @@
     }
   };
 
+  const fetchAssetHealth = async () => {
+    try {
+      const res = await fetch('/api/system/assets');
+      if (res.ok) {
+        assetHealth = await res.json();
+      }
+    } catch (e) {
+      console.error('Failed to fetch asset health', e);
+    }
+  };
+
   const fetchMetric = async (type) => {
     try {
       const res = await fetch(`/api/system/metrics?type=${type}&limit=1440`); // Last 24h (assuming 1/min)
       const json = await res.json();
       if (json.success) {
         return json.data.map(d => ({
-          time: d.ts / 1000, // Convert ms to seconds for LightweightCharts
-          value: d.val
+          time: d.time || d.ts / 1000, 
+          value: d.value || d.val
         }));
       }
     } catch (e) {
@@ -62,8 +74,11 @@
   };
 
   const refresh = async () => {
-    await fetchStatus();
-    await fetchAllMetrics();
+    await Promise.all([
+        fetchStatus(),
+        fetchAssetHealth(),
+        fetchAllMetrics()
+    ]);
     loading = false;
   };
 
@@ -156,6 +171,35 @@
           <span>DB Writers</span>
           <span class="value">{status?.market_service?.workers?.db_writers?.length || 0}</span>
         </div>
+      </div>
+
+      <!-- Asset Health -->
+      <div class="card">
+        <h3>Asset Health</h3>
+        {#if assetHealth}
+          <div class="stat-row">
+            <span>Healthy</span>
+            <span class="status-text ok">{assetHealth.summary.healthy}</span>
+          </div>
+          <div class="stat-row">
+            <span>Degraded</span>
+            <span class="status-text warn">{assetHealth.summary.degraded}</span>
+          </div>
+          <div class="stat-row">
+            <span>Down</span>
+            <span class="status-text err">{assetHealth.summary.down}</span>
+          </div>
+          <div class="progress-bar" style="display: flex; background: rgba(255,255,255,0.1);">
+            <div style="width: {(assetHealth.summary.healthy / assetHealth.summary.total) * 100}%; background: #4caf50; height: 100%;"></div>
+            <div style="width: {(assetHealth.summary.degraded / assetHealth.summary.total) * 100}%; background: #f4a261; height: 100%;"></div>
+            <div style="width: {(assetHealth.summary.down / assetHealth.summary.total) * 100}%; background: #ef476f; height: 100%;"></div>
+          </div>
+          <div class="sub-text">
+            Total: {assetHealth.summary.total} Assets
+          </div>
+        {:else}
+          <div class="sub-text">Loading asset health...</div>
+        {/if}
       </div>
     </div>
 

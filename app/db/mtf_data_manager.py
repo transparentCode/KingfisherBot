@@ -25,6 +25,51 @@ class MTFDataManager:
             '12h': 720, '1d': 1440
         }
 
+    @staticmethod
+    def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+        """
+        Static utility to resample OHLCV data to a different timeframe.
+        Useful for direct dataframe manipulation without full MTF context.
+        """
+        try:
+            # Ensure the index is datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+
+            # Define resampling rules for standard timeframes
+            timeframe_map = {
+                '1m': '1T', '3m': '3T', '5m': '5T', '15m': '15T', '30m': '30T',
+                '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
+                '1d': '1D', '1w': '1W'
+            }
+
+            if timeframe not in timeframe_map:
+                logging.getLogger("app").warning(
+                    f"Unsupported static resampling timeframe: {timeframe}, returning original data"
+                )
+                return df
+
+            freq = timeframe_map[timeframe]
+
+            resampled = (
+                df.resample(freq, label='left', closed='left')
+                .agg(
+                    {
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                    }
+                )
+                .dropna()
+            )
+            return resampled
+
+        except Exception as e:
+            logging.getLogger("app").error(f"Error in static resampling to {timeframe}: {e}")
+            return df
+
     async def get_mtf_data(self, asset: str, timeframes: List[str]) -> Dict[str, pd.DataFrame]:
         """Get data for multiple timeframes efficiently"""
         try:
@@ -174,6 +219,82 @@ class MTFDataManager:
                 availability[tf] = False
 
         return availability
+
+
+    def process_candles_to_df(self, candles: list) -> pd.DataFrame:
+        """
+        Convert raw candle records (list of dicts) into a normalized pandas DataFrame.
+        Handles index setting ('bucket'), numeric conversion, and cleaning.
+        """
+        if not candles:
+             return pd.DataFrame()
+
+        try:
+            # 1. Convert to DataFrame
+            df = pd.DataFrame([dict(row) for row in candles])
+            
+            # 2. Set index (handle 'bucket' which is standard from DB layer)
+            if 'bucket' in df.columns:
+                df = df.set_index('bucket')
+            elif 'timestamp' in df.columns:
+                df = df.set_index('timestamp')
+            
+            df.index = pd.to_datetime(df.index)
+            
+            # 3. Numeric conversion
+            numeric_columns = ["open", "high", "low", "close", "volume"]
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            # 4. Clean and Sort
+            df = df.dropna().sort_index()
+            
+            return df
+        except Exception as e:
+            self.logger.error(f"Error processing candles to DF: {e}")
+            return pd.DataFrame()
+
+    async def fetch_candle_data_range(
+        self,
+        symbol: str, 
+        start_time: datetime,
+        end_time: datetime,
+        limit: int = None
+    ):
+        """
+        Fetch raw 1m candles for a specific time range.
+        Used by routes that do their own resampling or processing.
+        """
+        self.logger.info("✅ DB handler initialized (via MTF Manager)")  
+        
+        # Always fetch 1m base data for maximum resolution
+        candles = await self.db_handler.read_candles(
+            symbol=symbol,
+            interval="1",  # DB uses "1" for 1m
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+
+        self.logger.info(
+            f"📈 Retrieved {len(candles) if candles else 0} raw candles from database"
+        )
+        return candles
+
+    async def get_candles_df(
+        self,
+        symbol: str,
+        start_time: datetime,
+        end_time: datetime,
+        limit: int = None
+    ) -> pd.DataFrame:
+        """
+        High-level method to fetch and process candles into a DataFrame.
+        Combines fetch_candle_data_range and process_candles_to_df.
+        """
+        candles = await self.fetch_candle_data_range(symbol, start_time, end_time, limit)
+        return self.process_candles_to_df(candles)
 
 
 

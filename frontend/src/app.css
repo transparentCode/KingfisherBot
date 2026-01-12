@@ -1,15 +1,28 @@
 :root {
-  --bg: #0e1013;
-  --panel: #15181e;
-  --panel-2: #1b1f26;
-  --border: #252a33;
+  /* Material Elevation System */
+  --bg: #0b0d10;         /* Level 0 */
+  --surface-1: #161a21;  /* Level 1 (Cards) */
+  --surface-2: #1f252e;  /* Level 2 (Hovers/Modals) */
+  --surface-3: #2a313c;  /* Level 3 (Active states) */
+  
+  --panel: var(--surface-1);   /* Legacy mapping */
+  --panel-2: var(--surface-2); /* Legacy mapping */
+  
+  --border: rgba(255, 255, 255, 0.08); /* Fainter borders for depth-first design */
+  
   --text: #e8eef7;
-  --muted: #9aa4b5;
+  --muted: #8d98a8;
+  
+  /* Vibrant Accents */
   --accent: #4cc9f0;
   --accent-2: #f4a261;
   --danger: #ef476f;
-  --success: #4caf50;
-  --shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+  --success: #06d6a0; /* More vibrant green */
+  
+  /* Material Shadows */
+  --shadow-sm: 0 2px 4px rgba(0,0,0,0.2);
+  --shadow-md: 0 8px 16px rgba(0,0,0,0.4);
+  --shadow: var(--shadow-md);
 
   font-family: 'Inter Tight', 'Space Grotesk', system-ui, -apple-system, sans-serif;
   background: var(--bg);
@@ -45,15 +58,16 @@ a {
 }
 
 .navbar {
-  background: rgba(21, 24, 30, 0.7); /* Semi-transparent */
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border);
+  background: rgba(11, 13, 16, 0.85); /* Slightly darker, matching --bg */
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border); /* Keep border for separate, but fast */
   padding: 12px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
   z-index: 10;
+  box-shadow: var(--shadow-sm); /* Elevation 2 */
 }
 
 .navbar nav {
@@ -179,12 +193,17 @@ button:hover {
 }
 
 .card {
-  background: rgba(21, 24, 30, 0.7); /* Semi-transparent panel */
-  backdrop-filter: blur(10px);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  background: var(--surface-1); 
+  border: none; /* Elevation style: no border */
+  border-radius: 12px;
   padding: 16px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+    box-shadow: var(--shadow-md); /* Lift on hover */
+    /* border-color: rgba(255,255,255,0.15); Removed */
 }
 
 .chart-card {

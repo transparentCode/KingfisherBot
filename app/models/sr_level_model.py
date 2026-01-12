@@ -69,6 +69,11 @@ class SRLevel:
     
     def add_touch(self, touch: TouchEvent) -> None:
         """Add a touch event"""
+        
+        if self.touches and (touch.bar_index - self.touches[-1].bar_index) <= 1:
+         # Consecutive touch - treat as same event
+         return 
+
         self.touches.append(touch)
         self.last_touch_time = touch.timestamp
         

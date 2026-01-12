@@ -18,8 +18,17 @@
     mode: 'geometric'
   };
 
-  $: if (visible && $assetStore.selectedAsset) {
+  $: if (visible && $assetStore.selectedAsset && $marketStore.startDateTime && $marketStore.endDateTime) {
     fetchFractalData();
+  }
+
+  // Also fetch if only visible/asset changes but dates are default (handle initial load case)
+  $: if (visible && $assetStore.selectedAsset && (!$marketStore.startDateTime || !$marketStore.endDateTime)) {
+      // Logic inside fetchFractalData will use store values, which might be null. 
+      // But verify if we want to fetch with defaults.
+      // Actually, DashboardView initializes the store via refreshAllData -> fetchCandles. 
+      // So startDateTime/endDateTime should be set shortly.
+      // We can rely on the check above. But if they are null, we might want to wait.
   }
 
   async function fetchFractalData() {

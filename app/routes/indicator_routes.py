@@ -1,10 +1,12 @@
-from flask import Blueprint, request, jsonify, render_template
-import pandas as pd
-import numpy as np
+from flask import Blueprint, request, jsonify
 import logging
 import asyncio
+
 from app.services.indicator_registers import IndicatorRegistry
-from app.db.db_handler import DBHandler
+from app.db.mtf_data_manager import MTFDataManager
+from app.utils.async_db_utils import precise_db_task
+from app.utils.validation_utils import validate_candle_request_params
+from app.utils.tvlc_utils import convert_indicator_output_to_tvlc, normalize_plotly_trace_for_json
 
 indicator_bp = Blueprint('indicator', __name__)
 
@@ -73,75 +75,42 @@ def get_indicator_schema_for_ui(indicator_id):
 def calculate_indicator(indicator_id):
     """Calculate and return indicator data using database candles (supports date range)."""
     try:
-        # Get request parameters
+        # 1. Validation & Param Parsing
         symbol = request.args.get('symbol', 'BTCUSDT')
         interval = request.args.get('interval', '1h')
         start_dt_str = request.args.get('startDateTime')
         end_dt_str = request.args.get('endDateTime')
         limit_param = request.args.get('limit')
 
-        # Parse optional date range
-        start_dt = pd.to_datetime(start_dt_str, utc=True) if start_dt_str else None
-        end_dt = pd.to_datetime(end_dt_str, utc=True) if end_dt_str else None
+        start_dt, end_dt, error_response = validate_candle_request_params(start_dt_str, end_dt_str)
+        if error_response:
+            return error_response
+            
         limit = int(limit_param) if limit_param is not None else None
 
-        # Get indicator registry
         registry = IndicatorRegistry.register_default_indicators()
-
-        # Check if indicator exists
         indicator_info = registry.get_indicator_for_ui(indicator_id)
         if not indicator_info:
-            return jsonify({
-                'success': False,
-                'error': f'Indicator {indicator_id} not found'
-            }), 404
+            return jsonify({'success': False, 'error': f'Indicator {indicator_id} not found'}), 404
 
-        # Fetch candles from database using sync wrapper
-        async def fetch_candles():
-            db_handler = DBHandler()
-            await db_handler.initialize()
+        # 2. Fetch Data
+        async def fetch_task(db_handler):
+            mtf = MTFDataManager(db_handler)
+            return await mtf.get_candles_df(symbol, start_dt, end_dt, limit)
 
-            candles = await db_handler.read_candles(
-                symbol=symbol,
-                interval='1m',
-                start_time=start_dt.to_pydatetime() if start_dt is not None else None,
-                end_time=end_dt.to_pydatetime() if end_dt is not None else None,
-                limit=limit * 10 if limit else None
-            )
+        df = asyncio.run(precise_db_task(fetch_task))
 
-            await db_handler.close()
-            return candles
+        if df.empty:
+            return jsonify({'success': False, 'error': f'No data found for {symbol}'}), 404
 
-        candles = asyncio.run(fetch_candles())
-
-        if not candles:
-            return jsonify({
-                'success': False,
-                'error': f'No data found for {symbol}'
-            }), 404
-
-        # Convert to DataFrame
-        df = pd.DataFrame([dict(row) for row in candles])
-        df = df.set_index('bucket')
-        df.index = pd.to_datetime(df.index)
-
-        # Convert to numeric types
-        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_columns:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df = df.dropna().sort_index()
-
-        # Resample to requested timeframe if needed
+        # 3. Resample
         if interval != '1m':
-            df = resample_ohlcv_data(df, interval)
-
-        # IMPORTANT: Limit BEFORE calculation to ensure alignment (only if limit provided)
+             df = MTFDataManager.resample_ohlcv(df, interval)
+             
         if limit:
             df = df.tail(limit)
 
-        # Get indicator parameters from query string
+        # 4. Parse Params
         params = {}
         for key, value in request.args.items():
             if key not in ['symbol', 'interval', 'lookback_days', 'startDateTime', 'endDateTime', 'limit']:
@@ -153,130 +122,16 @@ def calculate_indicator(indicator_id):
                 except ValueError:
                     params[key] = value
 
-        # Create indicator instance (FIX: Use create_indicator_instance instead of get_indicator_for_ui)
+        # 5. Calculate
         indicator = registry.create_indicator_instance(indicator_id, **params)
-
-        # Calculate indicator values
         indicator_data = indicator.calculate(df)
-
-        logger.info(f"Indicator data calculated successfully for {indicator_id}: {df.shape}")
-
-        # Generate plot data
         plot_data = indicator._get_plot_trace(indicator_data)
 
-        # --- TVLC FORMATTING START ---
-        tvlc_data = {
-            'candles': [],
-            'lines': [],
-            'markers': [],
-            'histograms': []
-        }
+        # 6. Format Output
+        tvlc_data = convert_indicator_output_to_tvlc(df, plot_data)
+        plot_data_normalized = normalize_plotly_trace_for_json(plot_data)
 
-        # A. Candles (Main Series)
-        for idx, row in df.iterrows():
-            tvlc_data['candles'].append({
-                'time': int(idx.timestamp()),
-                'open': row['open'],
-                'high': row['high'],
-                'low': row['low'],
-                'close': row['close']
-            })
-
-        # B. Lines, Markers & Histograms (From Plotly Traces)
-        traces = []
-        if isinstance(plot_data, list):
-            traces = plot_data
-        elif isinstance(plot_data, dict) and 'data' in plot_data:
-            traces = plot_data['data']
-
-        for trace in traces:
-            trace_type = trace.get('type', 'scatter')
-            mode = trace.get('mode', '')
-            name = trace.get('name', 'Unknown')
-            
-            # Skip main candlestick if present
-            if trace_type == 'candlestick':
-                continue
-
-            x_vals = trace.get('x', [])
-            y_vals = trace.get('y', [])
-            
-            if not len(x_vals) or not len(y_vals):
-                continue
-
-            # Convert timestamps
-            try:
-                if isinstance(x_vals[0], str):
-                    x_ts = [int(pd.Timestamp(x).timestamp()) for x in x_vals]
-                else:
-                    x_ts = [int(pd.Timestamp(x).timestamp()) for x in x_vals]
-            except:
-                continue
-
-            # 1. Lines
-            if 'lines' in mode or trace_type == 'scatter':
-                # Check if it's actually a line (Plotly default is lines+markers sometimes)
-                if 'lines' in mode or (mode == '' and trace_type == 'scatter'):
-                    line_series = {
-                        'name': name,
-                        'color': trace.get('line', {}).get('color', '#2962FF'),
-                        'lineWidth': trace.get('line', {}).get('width', 2),
-                        'lineStyle': 2 if trace.get('line', {}).get('dash') == 'dot' else 0,
-                        'data': []
-                    }
-                    for i, t in enumerate(x_ts):
-                        val = y_vals[i]
-                        if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                            line_series['data'].append({'time': t, 'value': val})
-                    
-                    if line_series['data']:
-                        tvlc_data['lines'].append(line_series)
-
-            # 2. Markers
-            if 'markers' in mode:
-                color = trace.get('marker', {}).get('color', '#2962FF')
-                # Heuristic for position
-                position = 'aboveBar' if 'High' in name or 'Sell' in name or 'Bearish' in name else 'belowBar'
-                shape = 'arrowDown' if position == 'aboveBar' else 'arrowUp'
-                
-                for i, t in enumerate(x_ts):
-                    val = y_vals[i]
-                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                        tvlc_data['markers'].append({
-                            'time': t,
-                            'position': position,
-                            'color': color,
-                            'shape': shape,
-                            'text': name[:1] # First letter as label
-                        })
-
-            # 3. Bar/Histogram (e.g. MACD)
-            if trace_type == 'bar':
-                hist_series = {
-                    'name': name,
-                    'color': trace.get('marker', {}).get('color', '#26a69a'),
-                    'data': []
-                }
-                for i, t in enumerate(x_ts):
-                    val = y_vals[i]
-                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                        hist_series['data'].append({'time': t, 'value': val})
-                
-                if hist_series['data']:
-                    tvlc_data['histograms'].append(hist_series)
-        # --- TVLC FORMATTING END ---
-
-        # Normalize datetime objects so the frontend chart can render them reliably
-        def _normalize_trace_x(trace):
-            x_vals = trace.get('x')
-            if isinstance(x_vals, (list, tuple)):
-                trace['x'] = [x.isoformat() if hasattr(x, 'isoformat') else x for x in x_vals]
-            return trace
-
-        if isinstance(plot_data, list):
-            plot_data = [_normalize_trace_x(t) for t in plot_data]
-        elif isinstance(plot_data, dict) and 'data' in plot_data:
-            plot_data['data'] = [_normalize_trace_x(t) for t in plot_data['data']]
+        logger.info(f"Indicator calculated: {indicator_id} {symbol} {interval}")
 
         return jsonify({
             'success': True,
@@ -285,59 +140,11 @@ def calculate_indicator(indicator_id):
             'symbol': symbol,
             'interval': interval,
             'data_points': len(df),
-            'plot_data': plot_data,
-            'tvlc_data': tvlc_data, # New field
+            'plot_data': plot_data_normalized,
+            'tvlc_data': tvlc_data,
             'parameters': params
         })
 
     except Exception as e:
         logger.error(f"Error calculating indicator {indicator_id}: {str(e)}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'indicator_id': indicator_id
-        }), 500
-
-def resample_ohlcv_data(df, timeframe):
-    """Resample OHLCV data to a different timeframe"""
-    try:
-        # Ensure the index is datetime
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-
-        # Define resampling rules for different timeframes
-        timeframe_map = {
-            '1m': '1T',  # 1 minute
-            '5m': '5T',  # 5 minutes
-            '15m': '15T',  # 15 minutes
-            '30m': '30T',  # 30 minutes
-            '1h': '1H',  # 1 hour
-            '4h': '4H',  # 4 hours
-            '1d': '1D',  # 1 day
-            '1w': '1W',  # 1 week
-        }
-
-        if timeframe not in timeframe_map:
-            logger.warning(f"Unsupported timeframe: {timeframe}, returning original data")
-            return df
-
-        freq = timeframe_map[timeframe]
-
-        # Resample OHLCV data
-        resampled = df.resample(freq).agg({
-            'open': 'first',  # First open price in the period
-            'high': 'max',  # Highest price in the period
-            'low': 'min',  # Lowest price in the period
-            'close': 'last',  # Last close price in the period
-            'volume': 'sum'  # Sum of volume in the period
-        }).dropna()
-
-        return resampled
-
-    except Exception as e:
-        logger.error(f"Error resampling data to {timeframe}: {e}")
-        return df
-
-@indicator_bp.route('/view', methods=['GET'])
-def view_backtest():
-    return render_template('indicators.html')
+        return jsonify({'success': False, 'error': str(e), 'indicator_id': indicator_id}), 500

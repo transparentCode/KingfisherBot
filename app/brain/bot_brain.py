@@ -303,6 +303,12 @@ class BotBrain:
             if rr < 1.0:  # Lower RR threshold for scalps
                 return None
             
+            # Dynamic Confidence: Higher Z-Score = Higher Probability of Snap-back
+            # Map Z-Score 2.0 -> 0.6, 4.0 -> 0.9
+            base_conf = 0.6
+            bonus_conf = min(0.3, (abs(z_score) - 2.0) * 0.15)
+            final_conf = base_conf + bonus_conf
+
             return TradeSignal(
                 timestamp=datetime.now(),
                 symbol=asset,
@@ -312,7 +318,7 @@ class BotBrain:
                 entry_price=entry,
                 stop_loss=stop_loss,
                 take_profit=target,
-                confidence=0.6,  # Scalps get lower base confidence
+                confidence=final_conf,
                 risk_reward_ratio=rr,
                 mtf_score=confluence.score,
                 mtf_conflict=confluence.conflict,
@@ -338,6 +344,11 @@ class BotBrain:
             if rr < 1.0:
                 return None
             
+            # Dynamic Confidence
+            base_conf = 0.6
+            bonus_conf = min(0.3, (abs(z_score) - 2.0) * 0.15)
+            final_conf = base_conf + bonus_conf
+
             return TradeSignal(
                 timestamp=datetime.now(),
                 symbol=asset,
@@ -347,7 +358,7 @@ class BotBrain:
                 entry_price=entry,
                 stop_loss=stop_loss,
                 take_profit=target,
-                confidence=0.6,
+                confidence=final_conf,
                 risk_reward_ratio=rr,
                 mtf_score=confluence.score,
                 mtf_conflict=confluence.conflict,

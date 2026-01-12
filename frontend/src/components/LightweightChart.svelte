@@ -7,19 +7,28 @@
   export let options = {};
   export let chartType = 'candlestick'; // 'candlestick' or 'line'
   export let mainSeriesOptions = {};
+  export let autoFitKey = null; // Change this to trigger auto-fit (e.g. Symbol change)
 
   let container;
   let legendContainer;
   let chart;
   let mainSeries; // Renamed from candleSeries
   let mainSeriesMarkers; // Renamed from candleSeriesMarkers
+  let hasFitContent = false;
+  let lastAutoFitKey = null;
+
   const lineSeriesMap = new Map();
   const histSeriesMap = new Map();
 
+  $: if (autoFitKey !== lastAutoFitKey) {
+      hasFitContent = false;
+      lastAutoFitKey = autoFitKey;
+  }
+
   const baseOptions = {
-    layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
-    grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
-    timeScale: { timeVisible: true, secondsVisible: false },
+    layout: { background: { color: '#161a21' }, textColor: '#e8eef7' }, /* Match --surface-1 and --text */
+    grid: { vertLines: { color: 'rgba(255, 255, 255, 0.05)' }, horzLines: { color: 'rgba(255, 255, 255, 0.05)' } },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: 'rgba(255, 255, 255, 0.1)' },
     rightPriceScale: { borderVisible: false },
     crosshair: { mode: 1 }
   };
@@ -60,7 +69,8 @@
             const mainData = param.seriesData.get(mainSeries);
             if (mainData) {
                 if (chartType === 'candlestick') {
-                    const { open, high, low, close } = mainData;
+                const main = /** @type {any} */ (mainData);
+                const { open, high, low, close } = main;
                     html += `<div class="legend-row">
                         <span class="legend-label">O</span> <span class="legend-value">${open.toFixed(2)}</span>
                         <span class="legend-label">H</span> <span class="legend-value">${high.toFixed(2)}</span>
@@ -69,7 +79,8 @@
                     </div>`;
                 } else {
                     // Line chart main series
-                    const val = mainData.value !== undefined ? mainData.value : mainData.close;
+                const main = /** @type {any} */ (mainData);
+                const val = main.value !== undefined ? main.value : main.close;
                     html += `<div class="legend-row">
                         <span class="legend-label">Value</span> <span class="legend-value">${val.toFixed(2)}</span>
                     </div>`;
@@ -102,7 +113,8 @@
                 }
 
                 if (name) {
-                    const val = value.value !== undefined ? value.value : value.close;
+                  const v = /** @type {any} */ (value);
+                  const val = v.value !== undefined ? v.value : v.close;
                     html += `<div class="legend-row" style="color: ${color}">
                         <span>${name}</span>: <span>${val.toFixed(2)}</span>
                     </div>`;
@@ -165,10 +177,12 @@
     }
 
     // Lines
+    // Note: removing and re-adding series on toggle can occasionally glitch in lightweight-charts.
+    // Keep series instances and just clear/set data so re-toggle is reliable.
     const incomingLineNames = new Set();
     if (Array.isArray(data.lines)) {
-      data.lines.forEach(line => {
-        const name = line.name || `line-${Math.random()}`;
+      data.lines.forEach((line, index) => {
+        const name = line.name || `line-${index}`;
         incomingLineNames.add(name);
         let series = lineSeriesMap.get(name);
         if (!series) {
@@ -187,24 +201,21 @@
             priceScaleId: line.priceScaleId || 'right'
           });
         }
-        if (Array.isArray(line.data)) {
-          series.setData(line.data);
-        }
+        series.setData(Array.isArray(line.data) ? line.data : []);
       });
     }
-    // Remove stale line series
+    // Clear stale line series
     for (const [name, series] of lineSeriesMap.entries()) {
       if (!incomingLineNames.has(name)) {
-        chart.removeSeries(series);
-        lineSeriesMap.delete(name);
+        series.setData([]);
       }
     }
 
     // Histograms
     const incomingHistNames = new Set();
     if (Array.isArray(data.histograms)) {
-      data.histograms.forEach(hist => {
-        const name = hist.name || `hist-${Math.random()}`;
+      data.histograms.forEach((hist, index) => {
+        const name = hist.name || `hist-${index}`;
         incomingHistNames.add(name);
         let series = histSeriesMap.get(name);
         if (!series) {
@@ -221,32 +232,21 @@
             base: hist.base || 0
           });
         }
-        if (Array.isArray(hist.data)) {
-          series.setData(hist.data);
-        }
+        series.setData(Array.isArray(hist.data) ? hist.data : []);
       });
     }
-    // Remove stale hist series
+    // Clear stale hist series
     for (const [name, series] of histSeriesMap.entries()) {
       if (!incomingHistNames.has(name)) {
-        chart.removeSeries(series);
-        histSeriesMap.delete(name);
+        series.setData([]);
       }
     }
 
-    // Only fit content if this is the first load or explicitly requested
-    // For now, we'll assume if we have data and it's the first time applying it (or very different), we fit.
-    // But to avoid resetting zoom on refresh, we can check if the time scale is already set.
-    // A simple heuristic: if the visible range is not set (default), fit content.
-    // However, TVLC doesn't expose "is zoomed" easily without checking visibleLogicalRange.
-    // For this specific request, let's just fit content if it's the initial data load.
-    
-    // We can use a flag or check if the chart has been interacted with.
-    // For simplicity, let's just fit content. If the user wants to preserve zoom, we'd need more complex logic.
-    // Actually, let's NOT fit content on every update if we can avoid it.
-    // But since we are replacing data (setData), TVLC might reset anyway.
-    // Let's stick to fitContent for now as it ensures the new data is visible.
-    chart.timeScale().fitContent();
+    // Only fit content if this is the first load or explicitly requested via key change
+    if (!hasFitContent) {
+        chart.timeScale().fitContent();
+        hasFitContent = true;
+    }
   }
 
   onMount(() => {

@@ -14,6 +14,7 @@ class MonitoringSystemConfig:
     logger_name: str = "app"
     rate_calculation_interval: int = 60  # seconds
     status_log_interval: int = 300  # seconds
+    metric_storage_interval: int = 5 # Store metrics frequently for charts
     write_queue_threshold: int = 1000
     calc_queue_threshold: int = 500
     check_interval: int = 1  # seconds
@@ -32,6 +33,7 @@ class MonitoringSystem:
         # Timers
         self.last_rate_calculation = time.time()
         self.last_status_log = time.time()
+        self.last_metric_storage = time.time()
         
         self.config = MonitoringSystemConfig() if config is None else config
         self.logger = logging.getLogger(self.config.logger_name)
@@ -114,9 +116,11 @@ class MonitoringSystem:
                         self.interval_counts[asset] = 0
 
                     self.last_rate_calculation = current_time
-                    
-                    # Store metrics after calculation
+
+                # 2.5 Store metrics frequency check
+                if current_time - self.last_metric_storage >= self.config.metric_storage_interval:
                     await self._store_metrics()
+                    self.last_metric_storage = current_time
 
                 # 3. Check queue sizes
                 write_queue_size = self.system.write_queue.qsize()

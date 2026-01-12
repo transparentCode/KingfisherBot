@@ -1,12 +1,15 @@
 from flask import Blueprint, jsonify, request
 import logging
-import os
-import shutil
+import app.globals as app_globals
 from app.db.redis_handler import RedisHandler
-from app.db.db_handler import DBHandler
 import asyncio
 from concurrent.futures import TimeoutError
-import app.globals as app_globals
+from app.utils.system_utils import (
+    get_disk_usage, 
+    get_system_load, 
+    read_log_tail, 
+    get_market_service_status
+)
 
 system_bp = Blueprint('system', __name__)
 logger = logging.getLogger(__name__)
@@ -14,6 +17,7 @@ logger = logging.getLogger(__name__)
 @system_bp.route('/api/system/status', methods=['GET'])
 def get_system_status():
     """Get system health status"""
+    # 1. Base Structure
     status = {
         'status': 'online',
         'components': {
@@ -21,69 +25,40 @@ def get_system_status():
             'redis': 'unknown'
         },
         'resources': {
-            'load_avg': os.getloadavg(),
-            'disk': {}
+            'load_avg': get_system_load(),
+            'disk': get_disk_usage()
         }
     }
     
-    # Check Disk Usage
+    # 2. Redis Check (Simple connectivity check)
     try:
-        total, used, free = shutil.disk_usage("/")
-        status['resources']['disk'] = {
-            'total_gb': round(total / (2**30), 2),
-            'used_gb': round(used / (2**30), 2),
-            'free_gb': round(free / (2**30), 2),
-            'percent': round((used / total) * 100, 1)
-        }
-    except Exception as e:
-        status['resources']['disk'] = {'error': str(e)}
-
-    # Check Redis
-    try:
+        # Note: Ideally this should use an async check or the one from MarketService
+        # For lightweight sync check we assume if object exists it's partly ok, 
+        # but real status comes from MarketService below.
         redis_handler = RedisHandler()
-        # We can't await here easily in sync Flask without async route support or run_until_complete
-        # Assuming RedisHandler is already initialized in the app context or we can check connection state
-        if redis_handler.connected:
-            status['components']['redis'] = 'connected'
-        else:
-            status['components']['redis'] = 'disconnected'
+        status['components']['redis'] = 'connected' if redis_handler.connected else 'disconnected'
     except Exception as e:
         status['components']['redis'] = f'error: {str(e)}'
 
-    # Check DB (simple check)
-    try:
-        # This is a bit hacky for sync check, but sufficient for status
-        status['components']['database'] = 'connected' # Placeholder, real check requires async
-    except Exception:
+    # 3. MarketService Integration (The Truth Source)
+    ms = app_globals.market_service_instance
+    market_status = get_market_service_status(ms)
+    
+    status['market_service'] = market_status
+    
+    # 4. Consolidate Component Status
+    if 'error' not in market_status:
+        # Use the deep insights from MarketService to update components
+        status['components']['database'] = market_status.get('db_connection', 'unknown')
+        
+        # Check workers health
+        workers = market_status.get('workers', {})
+        all_writers = all(w.get('alive') for w in workers.get('db_writers', []))
+        all_calcs = all(w.get('alive') for w in workers.get('calculators', []))
+        
+        status['components']['workers'] = 'healthy' if (all_writers and all_calcs) else 'degraded'
+    else:
         status['components']['database'] = 'error'
-
-    # Fetch detailed MarketService status if available
-    try:
-        ms = app_globals.market_service_instance
-        if ms and ms.loop and ms.loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                ms.get_status(),
-                ms.loop
-            )
-            market_status = future.result(timeout=2)
-            status['market_service'] = market_status
-            
-            # Update component status based on real internal state
-            status['components']['database'] = market_status.get('db_connection', 'unknown')
-            
-            # Check if all workers are alive
-            workers = market_status.get('workers', {})
-            all_writers_ok = all(w['alive'] for w in workers.get('db_writers', []))
-            all_calcs_ok = all(w['alive'] for w in workers.get('calculators', []))
-            
-            status['components']['workers'] = 'healthy' if (all_writers_ok and all_calcs_ok) else 'degraded'
-            
-    except TimeoutError:
-        logger.error("Error fetching market service status: Timeout")
-        status['market_service'] = {'error': 'timeout'}
-    except Exception as e:
-        logger.error(f"Error fetching market service status: {repr(e)}")
-        status['market_service'] = {'error': 'unreachable'}
 
     return jsonify(status)
 
@@ -100,13 +75,21 @@ def get_asset_status():
         for symbol, status in service.asset_states.items()
     ]
     
+    # Calculate summary stats based on frontend expectations (healthy/degraded/down)
+    statuses = list(service.asset_states.values())
+    healthy_count = statuses.count("READY")
+    down_count = statuses.count("ERROR")
+    # All other states are considered "working on it" or degraded
+    degraded_count = len(statuses) - healthy_count - down_count
+    
     return jsonify({
         'success': True,
         'assets': assets_list,
         'summary': {
             'total': len(service.assets),
-            'ready': list(service.asset_states.values()).count("READY"),
-            'error': list(service.asset_states.values()).count("ERROR")
+            'healthy': healthy_count,
+            'degraded': degraded_count,
+            'down': down_count
         }
     })
 
@@ -117,15 +100,7 @@ def get_logs():
         lines = int(request.args.get('lines', 100))
         log_file = 'logs/app.log'
         
-        if not os.path.exists(log_file):
-            return jsonify({'logs': []})
-            
-        with open(log_file, 'r') as f:
-            # Read last N lines efficiently
-            # For simplicity, reading all and slicing (not efficient for huge files but ok for 1MB logs)
-            all_lines = f.readlines()
-            recent_logs = all_lines[-lines:]
-            
+        recent_logs = read_log_tail(log_file, lines)
         return jsonify({'logs': recent_logs})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -155,7 +130,18 @@ def get_system_metrics():
                 ms.loop
             )
             data = future.result(timeout=5)
-            return jsonify({'success': True, 'data': data})
+            
+            # Format data for TVLC / Frontend (Normalize to {time: seconds, value: val})
+            formatted_data = []
+            for item in data:
+                if 'ts' in item and 'val' in item:
+                    formatted_data.append({
+                        # Convert ms timestamp to seconds for standard charting
+                        'time': int(item['ts'] / 1000),
+                        'value': item['val']
+                    })
+            
+            return jsonify({'success': True, 'data': formatted_data})
         else:
             return jsonify({'success': False, 'error': 'MarketService not running'}), 503
             

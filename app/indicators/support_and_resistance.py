@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 import logging
 from dataclasses import dataclass
+from sklearn.cluster import DBSCAN
 
 from app.models.sr_level_model import (
     SRLevel,
@@ -12,7 +13,6 @@ from app.models.sr_level_model import (
     LevelType,
     LevelStatus,
 )
-from app.utils.config_loader import ConfigLoader
 
 
 logger = logging.getLogger(__name__)
@@ -200,51 +200,50 @@ class SupportResistanceDetector:
         zone_width: float,
         level_type: LevelType,
     ) -> List[SRLevel]:
-        """
-        Cluster nearby pivots into zones using proximity grouping
-        """
-        if not pivots:
+        if not pivots: 
             return []
 
-        # Sort by price
-        sorted_pivots = sorted(pivots, key=lambda p: p.price)
-
+        # Convert to numpy for sklearn
+        prices = np.array([p.price for p in pivots]).reshape(-1, 1)
+        
+        # Use DBSCAN (tolerance = eps)
+        # min_samples = min_touch_count
+        db = DBSCAN(eps=tolerance, min_samples=self.zone_config["min_touch_count"]).fit(prices)
+        labels = db.labels_
+        
         zones = []
-        current_cluster = [sorted_pivots[0]]
-
-        for pivot in sorted_pivots[1:]:
-            last_price = current_cluster[-1].price
-
-            if abs(pivot.price - last_price) <= tolerance:
-                # Add to current cluster
-                current_cluster.append(pivot)
-            else:
-                # Start new cluster
-                if len(current_cluster) >= self.zone_config["min_touch_count"]:
-                    zone = self._create_zone_from_cluster(
-                        current_cluster, zone_width, level_type
-                    )
-                    zones.append(zone)
-
-                current_cluster = [pivot]
-
-        # Process last cluster
-        if len(current_cluster) >= self.zone_config["min_touch_count"]:
-            zone = self._create_zone_from_cluster(
-                current_cluster, zone_width, level_type
-            )
+        unique_labels = set(labels)
+        
+        for label in unique_labels:
+            if label == -1: continue # Noise
+            
+            # Get pivots in this cluster
+            cluster_indices = np.where(labels == label)[0]
+            cluster_pivots = [pivots[i] for i in cluster_indices]
+            
+            # Create Zone
+            zone = self._create_zone_from_cluster(cluster_pivots, zone_width, level_type)
             zones.append(zone)
-
+            
         return zones
 
+
+
     def _create_zone_from_cluster(
-        self, cluster: List[PivotPoint], zone_width: float, level_type: LevelType
+        self, cluster: List[PivotPoint], zone_width_input: float, level_type: LevelType
     ) -> SRLevel:
         """
         Create SRLevel from clustered pivots
+        
+        Args:
+            cluster: List of pivot points
+            zone_width_input: Base width calculated from ATR (usually 1.0 * ATR)
+            level_type: Expected type (Support/Resistance)
         """
-        # Calculate zone center (volume-weighted if enabled)
-        if self.zone_config["volume_weighted_center"]:
+        if not cluster: raise ValueError("Empty cluster")
+
+        # 1. Calculate Center (Volume Weighted or Mean)
+        if self.zone_config.get("volume_weighted_center", True):
             total_volume = sum(p.volume for p in cluster)
             if total_volume > 0:
                 center = sum(p.price * p.volume for p in cluster) / total_volume
@@ -253,21 +252,65 @@ class SupportResistanceDetector:
         else:
             center = np.mean([p.price for p in cluster])
 
-        # Zone boundaries
-        upper_bound = center + (zone_width / 2)
-        lower_bound = center - (zone_width / 2)
+        # 2. Calculate Bounds using Actual Spread + Minimum ATR Buffer
+        # zone_width_input usually comes from 1.0 * ATR or similar
+        # We enforce a minimum thickness of 0.2 * ATR (20% of the input base width) or whatever the user config implies.
+        # Let's assume zone_width_input is "1 ATR".
+        
+        # Calculate raw spread of the pivots
+        prices = [p.price for p in cluster]
+        p_min, p_max = min(prices), max(prices)
+        spread = p_max - p_min
+        
+        # Enforce minimum width if the cluster is too tight (0 variance)
+        # We ensure the zone serves as a buffer. 
+        # Using 0.2 * zone_width_input as the minimum thickness foundation
+        min_thickness = zone_width_input * 0.2
+        
+        if spread < min_thickness:
+            # Spread is too thin. Center on 'center' and apply min thickness
+            half_width = min_thickness / 2
+            upper_bound = center + half_width
+            lower_bound = center - half_width
+        else:
+            # Cluster has variance. Use the spread, but pad it slightly 
+            # so the extreme pivots aren't exactly on the edge.
+            padding = min_thickness * 0.5 # 10% of ATR padding
+            upper_bound = p_max + padding
+            lower_bound = p_min - padding
+
+        # Recalculate width
+        final_width = upper_bound - lower_bound
 
         # Formation time (earliest pivot)
         formation_time = min(p.timestamp for p in cluster)
+        
+        # Determine Current Status (Check against LAST PRICE to handle Backtest Flip logic)
+        # Only relevant if we have data loaded
+        status = LevelStatus.ACTIVE
+        current_type = level_type
+        
+        if self.data is not None and not self.data.empty:
+            last_close = self.data['close'].iloc[-1]
+            
+            # If Support is NOW above price -> It's Resistance (Flipped)
+            if level_type == LevelType.SUPPORT and last_close < lower_bound:
+                current_type = LevelType.RESISTANCE
+                status = LevelStatus.FLIPPED
+                
+            # If Resistance is NOW below price -> It's Support (Flipped)
+            elif level_type == LevelType.RESISTANCE and last_close > upper_bound:
+                current_type = LevelType.SUPPORT
+                status = LevelStatus.FLIPPED
 
         # Create level
         level = SRLevel(
             level_id="",  # Will be auto-generated
-            level_type=level_type,
+            level_type=current_type,
             center=center,
             upper_bound=upper_bound,
             lower_bound=lower_bound,
-            zone_width=zone_width,
+            zone_width=final_width,
             strength=0.0,  # Calculated later
             touch_count=len(cluster),
             rejection_count=0,  # Calculated in validation
@@ -278,9 +321,9 @@ class SupportResistanceDetector:
             formation_time=formation_time,
             last_touch_time=max(p.timestamp for p in cluster),
             age_bars=self.current_bar - cluster[0].index,
-            status=LevelStatus.ACTIVE,
+            status=status,
             pivots=cluster,
-            atr_at_formation=self._calculate_atr(),
+            atr_at_formation=self._calculate_catr(),
             avg_volume_at_formation=self.data["volume"].tail(20).mean(),
         )
 
@@ -451,39 +494,53 @@ class SupportResistanceDetector:
             if level.strength >= min_threshold and level.age_bars < max_age
         ]
 
-    def _merge_with_existing(self, new_levels: List[SRLevel]) -> None:
+    def _merge_with_existing(self, new_zones: List[SRLevel]) -> None:
         """
-        Merge newly detected levels with existing ones
-        Preserves touch history and state
+        Map new zones to old zones to preserve history (Strength/Status).
         """
-        merged = []
-        price_tol = self.config["merging"]["price_tolerance_pct"]
-
-        for new_level in new_levels:
-            # Find matching existing level
+        # Create a dict of old zones for fast lookup by ID or Center
+        # Since centers drift, we use spatial overlap
+        
+        merged_list = []
+        
+        for new_z in new_zones:
+            # Try to find a matching old zone
             match = None
-            for existing in self.levels:
-                price_diff_pct = (
-                    abs(new_level.center - existing.center) / existing.center
-                )
-
-                if (
-                    price_diff_pct < price_tol
-                    and new_level.level_type == existing.level_type
-                ):
-                    match = existing
+            for old_z in self.levels:
+                # Check overlap (Are these the same zone?)
+                overlap = max(0, min(new_z.upper_bound, old_z.upper_bound) - 
+                                 max(new_z.lower_bound, old_z.lower_bound))
+                if overlap > 0 and new_z.level_type == old_z.level_type:
+                    match = old_z
                     break
-
+            
             if match:
-                # Update existing level with new pivots
-                match.pivots.extend(new_level.pivots)
-                match.touch_count = len(match.pivots)
-                merged.append(match)
-            else:
-                # Add as new level
-                merged.append(new_level)
+                # We found the old version of this zone.
+                # Update its geometry (pivots might have shifted slightly)
+                match.center = new_z.center
+                match.upper_bound = new_z.upper_bound
+                match.lower_bound = new_z.lower_bound
+                
+                # Careful not to lose old pivots if they are still relevant
+                # But DBSCAN runs on *all* pivots, so new_z.pivots likely contains valid ones?
+                # Actually, detect_pivots finds recent history. 
+                # If we overwrite `match.pivots = new_z.pivots`, we might lose very old pivots that fell out of `historical_depth`
+                # but are still part of the level.
+                
+                # De-duplication Logic:
+                existing_indices = {p.index for p in match.pivots}
+                for p in new_z.pivots:
+                    if p.index not in existing_indices:
+                        match.pivots.append(p)
 
-        self.levels = merged
+                # Keep its 'Strength', 'Touches', 'Status' from history
+                merged_list.append(match)
+            else:
+                # Totally new zone found by DBSCAN
+                merged_list.append(new_z)
+                
+        self.levels = merged_list
+
 
     def get_active_levels(self) -> List[SRLevel]:
         """Get all active levels"""

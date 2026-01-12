@@ -1,18 +1,50 @@
 from flask import Blueprint, request, jsonify
-from app.db.db_handler import DBHandler
-import pandas as pd
-from datetime import datetime, timedelta
 import logging
 import asyncio
+
+from app.db.mtf_data_manager import MTFDataManager
+from app.utils.market_analysis_utils import get_market_status_with_fallback
+from app.utils.async_db_utils import precise_db_task
+from app.utils.validation_utils import validate_asset_readiness, validate_candle_request_params
+from app.utils.tvlc_utils import format_candles_for_response
 
 market_bp = Blueprint("market", __name__)
 logger = logging.getLogger(__name__)
 
 
-from config.asset_indicator_config import ConfigurationManager
+@market_bp.route("/api/asset/regime/<symbol>", methods=["GET"])
+def get_asset_regime(symbol):
+    """
+    Get latest Regime and Hilbert Cycle metrics for a symbol and timeframe.
+    If database data is missing (cold start), it calculates on-demand.
+    """
+    try:
+        # 0. Asset Readiness Validation
+        if error_response := validate_asset_readiness(symbol):
+            return error_response
+
+        timeframe = request.args.get("timeframe", "1h")
+        logger.info(f"🔍 Fetching market status for {symbol} {timeframe}")
+
+        async def fetch_task(db_handler):
+            return await get_market_status_with_fallback(db_handler, symbol, timeframe)
+
+        result = asyncio.run(precise_db_task(fetch_task))
+        
+        if not result:
+             return jsonify({
+                "success": False, 
+                "error": "Could not determine market status (No data)"
+            }), 404
+
+        return jsonify({"success": True, "data": result})
+
+    except Exception as e:
+        logger.error(f"Error getting market status: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
-@market_bp.route("/api/search-symbols", methods=["GET"])
+@market_bp.route("/api/asset/search-symbols", methods=["GET"])
 def search_symbols():
     try:
         query = request.args.get("q", "").upper()
@@ -35,34 +67,23 @@ def search_symbols():
         return jsonify({"success": False, "error": str(e)})
 
 
-@market_bp.route("/api/candle-data/<symbol>")
+@market_bp.route("/api/asset/candle-data/<symbol>")
 def get_candle_data(symbol):
     """Get candlestick data for a symbol within a time range"""
     logger.info(f"📊 Fetching candle data for {symbol}")
     try:
+        if error_response := validate_asset_readiness(symbol):
+            return error_response
+        
         timeframe = request.args.get("timeframe", "1h")
         start_dt_str = request.args.get("startDateTime")
         end_dt_str = request.args.get("endDateTime")
         limit_param = request.args.get("limit")
 
-        if not start_dt_str or not end_dt_str:
-            return (
-                jsonify({
-                    "success": False,
-                    "error": "Missing required params: startDateTime and endDateTime"
-                }),
-                400,
-            )
-
-        # Basic validation; parse to timezone-aware datetimes for asyncpg
-        try:
-            start_dt = pd.to_datetime(start_dt_str, utc=True)
-            end_dt = pd.to_datetime(end_dt_str, utc=True)
-        except Exception:
-            return (
-                jsonify({"success": False, "error": "Invalid datetime format"}),
-                400,
-            )
+        # 1. Validate Params
+        start_dt, end_dt, error_response = validate_candle_request_params(start_dt_str, end_dt_str)
+        if error_response:
+            return error_response
 
         limit = int(limit_param) if limit_param is not None else None
 
@@ -70,54 +91,13 @@ def get_candle_data(symbol):
             f"Parameters: timeframe={timeframe}, start={start_dt_str}, end={end_dt_str}, limit={limit}"
         )
 
-        async def fetch_candle_data():
-            db_handler = DBHandler()
-            await db_handler.initialize()
-            logger.info("✅ DB handler initialized")
+        async def fetch_task(db_handler):
+            # Use MTF manager logic which we added to execute the read
+            mtf = MTFDataManager(db_handler)
+            return await mtf.get_candles_df(symbol, start_dt, end_dt, limit)
 
-            candles = await db_handler.read_candles(
-                symbol=symbol,
-                interval="1m",  # Always get base 1m data, then resample
-                start_time=start_dt.to_pydatetime(),
-                end_time=end_dt.to_pydatetime(),
-                limit=limit,
-            )
-
-            logger.info(
-                f"📈 Retrieved {len(candles) if candles else 0} raw candles from database"
-            )
-
-            await db_handler.close()
-            return candles
-
-        # Get candle data
-        candles = asyncio.run(fetch_candle_data())
-
-        if not candles:
-            logger.warning(f"❌ No candles found for {symbol}")
-            return jsonify(
-                {"success": False, "error": f"No data found for {symbol}"}
-            ), 404
-
-        logger.info(f"📊 Processing {len(candles)} candles")
-
-        # Convert to DataFrame
-        df = pd.DataFrame([dict(row) for row in candles])
-        logger.info(f"DataFrame columns: {df.columns.tolist()}")
-        logger.info(f"DataFrame shape: {df.shape}")
-
-        df = df.set_index("bucket")
-        df.index = pd.to_datetime(df.index)
-
-        # Convert to proper numeric types
-        numeric_columns = ["open", "high", "low", "close", "volume"]
-        for col in numeric_columns:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        # Remove any rows with NaN values
-        df = df.dropna()
-        logger.info(f"After cleaning: {df.shape}")
+        # 2. Get processed DataFrame directly
+        df = asyncio.run(precise_db_task(fetch_task))
 
         if df.empty:
             logger.warning(f"❌ No valid numeric data for {symbol}")
@@ -125,13 +105,10 @@ def get_candle_data(symbol):
                 {"success": False, "error": f"No valid numeric data for {symbol}"}
             ), 404
 
-        # Sort by timestamp ascending (oldest first)
-        df = df.sort_index()
-
         # Resample to requested timeframe if needed
         if timeframe != "1m":
             logger.info(f"🔄 Resampling from 1m to {timeframe}")
-            df = resample_ohlcv_data(df, timeframe)
+            df = MTFDataManager.resample_ohlcv(df, timeframe)
             logger.info(f"After resampling: {df.shape}")
 
         # Only trim if caller explicitly provided a limit; otherwise return full range
@@ -140,34 +117,10 @@ def get_candle_data(symbol):
 
         logger.info(f"Final data shape: {df.shape}")
 
-        # Convert to the format expected by the frontend
-        candles = []
-        tvlc_candles = [] # New TVLC format
-        
-        for timestamp, row in df.iterrows():
-            # Existing format
-            candles.append(
-                {
-                    "time": int(timestamp.timestamp()),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                }
-            )
-            
-            # TVLC format
-            tvlc_candles.append(
-                {
-                    "time": int(timestamp.timestamp()),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                }
-            )
+        # Format for response using utility
+        formatted_data = format_candles_for_response(df)
+        candles = formatted_data['candles']
+        tvlc_candles = formatted_data['tvlc_candles']
 
         logger.info(f"✅ Returning {len(candles)} formatted candles")
 
@@ -180,60 +133,11 @@ def get_candle_data(symbol):
                     "startDateTime": start_dt.isoformat(),
                     "endDateTime": end_dt.isoformat(),
                     "candles": candles,
-                    "tvlc_data": { "candles": tvlc_candles }, # New field
+                    "tvlc_data": { "candles": tvlc_candles }, 
                 },
             }
         )
-
+        
     except Exception as e:
         logger.error(f"❌ Error getting candle data for {symbol}: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
-
-
-def resample_ohlcv_data(df, timeframe):
-    """Resample OHLCV data to a different timeframe"""
-    try:
-        # Ensure the index is datetime
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-
-        # Define resampling rules for different timeframes
-        timeframe_map = {
-            "1m": "1T",  # 1 minute
-            "5m": "5T",  # 5 minutes
-            "15m": "15T",  # 15 minutes
-            "30m": "30T",  # 30 minutes
-            "1h": "1H",  # 1 hour
-            "4h": "4H",  # 4 hours
-            "1d": "1D",  # 1 day
-            "1w": "1W",  # 1 week
-        }
-
-        if timeframe not in timeframe_map:
-            logger.warning(
-                f"Unsupported timeframe: {timeframe}, returning original data"
-            )
-            return df
-
-        freq = timeframe_map[timeframe]
-
-        # Resample OHLCV data
-        resampled = (
-            df.resample(freq)
-            .agg(
-                {
-                    "open": "first",  # First open price in the period
-                    "high": "max",  # Highest price in the period
-                    "low": "min",  # Lowest price in the period
-                    "close": "last",  # Last close price in the period
-                    "volume": "sum",  # Sum of volume in the period
-                }
-            )
-            .dropna()
-        )
-
-        return resampled
-
-    except Exception as e:
-        logger.error(f"Error resampling data to {timeframe}: {e}")
-        return df

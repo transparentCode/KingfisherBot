@@ -3,11 +3,15 @@ from app.orchestration.indicator.trendline_orchestrator import TrendlineOrchestr
 from app.orchestration.strategy.strategy_orchestrator import StrategyOrchestrator
 from app.indicators.regime_metrices import RegimeMetrics
 from app.indicators.hilbert_cycle import HilbertCycle
+from app.indicators.support_and_resistance import SupportResistanceDetector
+from app.models.sr_level_model import SRLevel, LevelType, LevelStatus, PivotPoint, TouchEvent
 from app.db.redis_handler import RedisHandler
 import asyncio
 import logging
 import os
 import time
+import yaml
+import datetime
 from typing import Dict, List, Optional, Set
 
 from dotenv import load_dotenv
@@ -304,6 +308,71 @@ class IndicatorCalcService:
             
             # Access internal state for metadata
             metrics_df = regime_metrics.metrics_df
+
+            # 2.2 Run Calculations - Support & Resistance
+            try:
+                # Load Config
+                sr_config_path = "sr_config.yaml"
+                if os.path.exists(sr_config_path):
+                    with open(sr_config_path, "r") as f:
+                        sr_config = yaml.safe_load(f)
+
+                    # Fetch active levels from DB (Hydration)
+                    active_levels_data = await self.db_pool.get_active_sr_levels(asset, timeframe)
+                    active_levels = []
+                    
+                    for l_data in active_levels_data:
+                        try:
+                            # Reconstruct objects
+                            ft = datetime.datetime.fromisoformat(l_data['formation_time']) if l_data.get('formation_time') else datetime.datetime.now()
+                            
+                            pivots = []
+                            for p in l_data.get('pivots', []):
+                                pt = datetime.datetime.fromisoformat(p['timestamp']) if isinstance(p['timestamp'], str) else datetime.datetime.fromtimestamp(p['timestamp']/1000) if isinstance(p['timestamp'], (int, float)) else datetime.datetime.now()
+                                pivots.append(PivotPoint(
+                                    price=p['price'], index=p['index'], timestamp=pt,
+                                    volume=p['volume'], timeframe=p['timeframe'], is_high=p['is_high']
+                                ))
+
+                            lvl = SRLevel(
+                                level_id=l_data['level_id'],
+                                level_type=LevelType(l_data['type']),
+                                center=l_data['center'],
+                                upper_bound=l_data['upper_bound'],
+                                lower_bound=l_data['lower_bound'],
+                                zone_width=l_data.get('zone_width', l_data['upper_bound'] - l_data['lower_bound']),
+                                strength=l_data['strength'],
+                                status=LevelStatus(l_data['status']),
+                                touch_count=l_data['touch_count'],
+                                formation_time=ft,
+                                pivots=pivots
+                            )
+                            # Restore last touch time
+                            if l_data.get('last_touch_time'):
+                                lvl.last_touch_time = datetime.datetime.fromisoformat(l_data['last_touch_time'])
+                                
+                            active_levels.append(lvl)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to hydrate level {l_data.get('level_id')}: {e}")
+
+                    # Instantiate and Update
+                    detector = SupportResistanceDetector(timeframe, sr_config)
+                    detector.levels = active_levels
+                    detector.update(df)
+                    
+                    # Persist (Save ALL levels to track broken/flipped ones)
+                    all_levels = [l.to_dict() for l in detector.levels]
+                    await self.db_pool.write_sr_levels(asset, timeframe, all_levels)
+                    
+                    # Redis (Active only for strategies)
+                    active_levels_export = [l.to_dict() for l in detector.get_active_levels()]
+                    if self.redis_handler:
+                         await self.redis_handler.set_key(f"sr:{asset}:{timeframe}", active_levels_export)
+                         
+                    self.logger.info(f"SR: Updated {len(active_levels_export)} active levels for {asset} {timeframe}")
+
+            except Exception as e:
+                self.logger.error(f"SR Calculation error for {asset} {timeframe}: {e}", exc_info=True)
             
             if metrics_df is None or metrics_df.empty:
                 self.logger.warning(f"Regime metrics calculation failed for {asset} {timeframe}")
